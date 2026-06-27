@@ -1,0 +1,12 @@
+[build-system]
+requires = ["scikit-build-core", "pybind11"]
+build-backend = "scikit_build_core.build"
+
+[project]
+name = "lumapy"
+version = "0.0.1"
+description = "Shader prototyping library"
+dependencies = []
+
+[tool.scikit-build]
+cmake.version = "CMakeLists.txt"
