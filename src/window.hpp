@@ -4,6 +4,7 @@
 #include <string>
 #include <stdexcept>
 #include <memory>
+#include <expected>
 
 struct WindowDeleter
 {
@@ -27,29 +28,37 @@ struct MouseState
 
 class Window
 {
-public:
+private:
     Window(int width, int height, const std::string& title) :
-        width_(width), height_(height), title_(title)
+        width_(width), height_(height), title_(title) {}
+
+public:
+    static std::expected<std::unique_ptr<Window>, std::string> create(int width, int height, const std::string& title)
     {
         if (!glfwInit())
         {
-            throw std::runtime_error("Failed to initialize GLFW");
+            return std::unexpected("Failed to initialize GLFW");
         }
 
         glfwWindowHint(GLFW_CLIENT_API, GLFW_NO_API);
         glfwWindowHint(GLFW_RESIZABLE, GLFW_FALSE);
 
-        GLFWwindow* raw_window = glfwCreateWindow(width_, height_, std::string(title).c_str(), nullptr, nullptr);
+        GLFWwindow* raw_window = glfwCreateWindow(width, height, title.c_str(), nullptr, nullptr);
         if (!raw_window)
         {
-            throw std::runtime_error("Failed to create window");
+            glfwTerminate();
+            return std::unexpected("Failed to create window");
         }
-        window_.reset(raw_window);
 
-        glfwSetWindowUserPointer(window_.get(), this);
-        glfwSetCursorPosCallback(window_.get(), mouse_callback);
+        auto window = std::unique_ptr<Window>(new Window(width, height, title));
+        window->window_.reset(raw_window);
 
-        glfwSetInputMode(window_.get(), GLFW_CURSOR, GLFW_CURSOR_DISABLED);
+        glfwSetWindowUserPointer(window->window_.get(), window.get());
+        glfwSetCursorPosCallback(window->window_.get(), mouse_callback);
+
+        glfwSetInputMode(window->window_.get(), GLFW_CURSOR, GLFW_CURSOR_DISABLED);
+
+        return window;
     };
 
     ~Window()

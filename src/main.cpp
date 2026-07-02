@@ -2,22 +2,13 @@
 #include <pybind11/functional.h>
 #include <print>
 #include <atomic>
-#include <thread>
-#include <chrono>
-#include <csignal>
-#include <cstdlib>
+#include <expected>
 
 #include "Logger.hpp"
 #include "window.hpp"
-
-extern "C" void sigint_handler(int signum)
-{
-    std::print("\n[Engine] SIGINT captured. Shutting down immediately...\n");
-    std::exit(130);
-}
+#include "Renderer.hpp"
 
 namespace py = pybind11;
-
 
 class Engine {
 public:
@@ -36,35 +27,31 @@ public:
 
     void init(int width, int height, const std::string& title)
     {
-        window_ = std::make_unique<Window>( width, height, title );
+        renderer_.reset();
+        window_.reset();
+
+        auto res = Window::create(width, height, title)
+            .and_then([&](std::unique_ptr<Window> win) {
+                window_ = std::move(win);
+                return Renderer::create(logger_, *window_);
+            })
+            .and_then([&](std::unique_ptr<Renderer> ren) {
+                renderer_ = std::move(ren);
+                return std::expected<void, std::string>{};
+            })
+            .or_else([&](const std::string& err) -> std::expected<void, std::string> {
+                logger_.log(err);
+                throw std::runtime_error(err);
+            });
     }
 
-    void run(py::function function)
+    void run()
     {
-
-        std::signal(SIGINT, sigint_handler);
-
         is_running_.store(true, std::memory_order_relaxed);
 
+        try
         {
             py::gil_scoped_release release;
-
-            logic_thread_ = std::jthread([this, function]()
-                {
-                    py::gil_scoped_acquire acquire;
-
-                    try
-                    {
-                        function();
-                    }
-                    catch (const std::exception& e)
-                    {
-                        logger_.log(e.what());
-                        stop();
-                    }
-
-                    stop();
-                });
 
             while (is_running_.load(std::memory_order_relaxed))
             {
@@ -73,18 +60,24 @@ public:
                 {
                     stop();
                 }
-            }
 
-            if (logic_thread_.joinable())
-            {
-                logic_thread_.request_stop();
-                logic_thread_.join();
+                {
+                    py::gil_scoped_acquire acquire;
+                    if (PyErr_CheckSignals() != 0)
+                    {
+                        throw py::error_already_set();
+                    }
+                    frame_function_();
+                }
             }
+        }
+        catch (...)
+        {
+            logger_.shutdown();
+            throw;
         }
         
         logger_.shutdown();
-
-        std::signal(SIGINT, SIG_DFL);
     }
 
     bool running() const
@@ -100,6 +93,12 @@ public:
     void log(const std::string& msg)
     {
         logger_.log(msg);
+    }
+
+    py::function on_frame(py::function fun)
+    {
+        frame_function_ = fun;
+        return fun;
     }
 
     MouseState get_mouse_state() const
@@ -118,6 +117,9 @@ private:
     std::jthread logic_thread_;
 
     std::unique_ptr<Window> window_;
+    std::unique_ptr<Renderer> renderer_;
+
+    py::function frame_function_;
 };
 
 PYBIND11_MODULE(lumapy, m){
@@ -130,6 +132,7 @@ PYBIND11_MODULE(lumapy, m){
         .def("running", &Engine::running)
         .def("stop", &Engine::stop)
         .def("onError", &Engine::on_error)
+        .def("onFrame", &Engine::on_frame)
         .def("log", &Engine::log)
         .def("getMouseState", &Engine::get_mouse_state)
         .def("isKeyPressed", &Engine::is_key_pressed);

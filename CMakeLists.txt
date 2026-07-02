@@ -6,8 +6,11 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 find_package(pybind11 CONFIG REQUIRED)
 
+find_package(Vulkan REQUIRED)
+
 include(FetchContent)
-# GLFW
+
+# glfw
 set(GLFW_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
 set(GLFW_BUILD_TESTS OFF CACHE BOOL "" FORCE)
 set(GLFW_BUILD_DOCS OFF CACHE BOOL "" FORCE)
@@ -19,8 +22,37 @@ FetchContent_Declare(
 )
 FetchContent_MakeAvailable(glfw)
 
-add_library(lumapy MODULE src/main.cpp src/MpscQueue.hpp src/Logger.hpp src/window.hpp )
-target_link_libraries(lumapy PRIVATE pybind11::module glfw)
+#volk
+FetchContent_Declare(
+    volk
+    GIT_REPOSITORY https://github.com/zeux/volk.git
+    GIT_TAG 1.4.350
+    GIT_SHALLOW TRUE
+)
+FetchContent_MakeAvailable(volk)
+
+#vma
+FetchContent_Declare(
+    vma
+    GIT_REPOSITORY https://github.com/GPUOpen-LibrariesAndSDKs/VulkanMemoryAllocator.git
+    GIT_TAG v3.4.0
+    GIT_SHALLOW TRUE
+)
+FetchContent_MakeAvailable(vma)
+
+if(NOT TARGET vma)
+    add_library(vma INTERFACE)
+    target_include_directories(vma INTERFACE ${vma_SOURCE_DIR}/include)
+endif()
+
+add_library(lumapy MODULE src/main.cpp src/MpscQueue.hpp src/Logger.hpp src/window.hpp src/Renderer.hpp)
+
+target_link_libraries(lumapy PRIVATE 
+    pybind11::module
+    glfw
+    volk
+    vma
+)
 set_target_properties(lumapy PROPERTIES PREFIX "${PYTHON_MODULE_PREFIX}" SUFFIX "${PYTHON_MODULE_EXTENSION}")
 
 target_compile_features(lumapy PRIVATE cxx_std_23)
