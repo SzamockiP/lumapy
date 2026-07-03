@@ -6,7 +6,7 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 find_package(pybind11 CONFIG REQUIRED)
 
-find_package(Vulkan REQUIRED)
+find_package(Vulkan REQUIRED COMPONENTS shaderc_combined)
 
 include(FetchContent)
 
@@ -43,6 +43,7 @@ FetchContent_MakeAvailable(vma)
 if(NOT TARGET vma)
     add_library(vma INTERFACE)
     target_include_directories(vma INTERFACE ${vma_SOURCE_DIR}/include)
+    target_compile_definitions(vma INTERFACE VMA_STATIC_VULKAN_FUNCTIONS=0 VMA_DYNAMIC_VULKAN_FUNCTIONS=1)
 endif()
 
 #vk-bootstrap
@@ -54,7 +55,7 @@ FetchContent_Declare(
 )
 FetchContent_MakeAvailable(vk-bootstrap)
 
-add_library(lumapy MODULE src/main.cpp src/MpscQueue.hpp src/Logger.hpp src/window.hpp src/Renderer.hpp)
+add_library(lumapy MODULE src/main.cpp src/MpscQueue.hpp src/Logger.hpp src/window.hpp src/Renderer.hpp src/vma_impl.cpp)
 
 target_link_libraries(lumapy PRIVATE 
     pybind11::module
@@ -62,6 +63,7 @@ target_link_libraries(lumapy PRIVATE
     volk
     vma
     vk-bootstrap::vk-bootstrap
+    Vulkan::shaderc_combined
 )
 set_target_properties(lumapy PROPERTIES PREFIX "${PYTHON_MODULE_PREFIX}" SUFFIX "${PYTHON_MODULE_EXTENSION}")
 

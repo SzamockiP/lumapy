@@ -1,6 +1,7 @@
 #pragma once
 #include <volk.h>
 #include <VkBootstrap.h>
+#include <vk_mem_alloc.h>
 
 #include <expected>
 #include <memory>
@@ -73,7 +74,13 @@ public:
 		renderer->vkb_physical_device_ = phys_ret.value();
 
 		// Logical Device + Queues
-		auto dev_ret = vkb::DeviceBuilder{ renderer->vkb_physical_device_ }.build();
+		VkPhysicalDeviceDynamicRenderingFeaturesKHR dynamic_rendering_feature{};
+		dynamic_rendering_feature.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DYNAMIC_RENDERING_FEATURES_KHR;
+		dynamic_rendering_feature.dynamicRendering = VK_TRUE;
+
+		auto dev_ret = vkb::DeviceBuilder{ renderer->vkb_physical_device_ }
+			.add_pNext(&dynamic_rendering_feature)
+			.build();
 
 		if (!dev_ret)
 		{
@@ -112,17 +119,82 @@ public:
 		renderer->swapchain_images_ = renderer->vkb_swapchain_.get_images().value();
 		renderer->swapchain_image_views_ = renderer->vkb_swapchain_.get_image_views().value();
 
+		// VMA Allocator
+		VmaVulkanFunctions vulkanFunctions = {};
+		vulkanFunctions.vkGetInstanceProcAddr = vkGetInstanceProcAddr;
+		vulkanFunctions.vkGetDeviceProcAddr = vkGetDeviceProcAddr;
+
+		VmaAllocatorCreateInfo allocatorInfo = {};
+		allocatorInfo.physicalDevice = renderer->vkb_physical_device_.physical_device;
+		allocatorInfo.device = renderer->vkb_device_.device;
+		allocatorInfo.instance = renderer->vkb_instance_.instance;
+		allocatorInfo.pVulkanFunctions = &vulkanFunctions;
+		allocatorInfo.vulkanApiVersion = VK_API_VERSION_1_3;
+
+		if (vmaCreateAllocator(&allocatorInfo, &renderer->allocator_) != VK_SUCCESS)
+		{
+			return std::unexpected("Vulkan: Failed to create VMA allocator");
+		}
+
+		// Command Pool
+		VkCommandPoolCreateInfo poolInfo{};
+		poolInfo.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
+		poolInfo.flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT;
+		poolInfo.queueFamilyIndex = renderer->graphics_queue_family_;
+
+		if (vkCreateCommandPool(renderer->vkb_device_.device, &poolInfo, nullptr, &renderer->command_pool_) != VK_SUCCESS)
+		{
+			return std::unexpected("Vulkan: Failed to create command pool");
+		}
+
+		// Sync Objects
+		VkSemaphoreCreateInfo semaphoreInfo{};
+		semaphoreInfo.sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO;
+
+		VkFenceCreateInfo fenceInfo{};
+		fenceInfo.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
+		fenceInfo.flags = VK_FENCE_CREATE_SIGNALED_BIT;
+
+		for (size_t i = 0; i < MAX_FRAMES_IN_FLIGHT; i++)
+		{
+			if (vkCreateSemaphore(renderer->vkb_device_.device, &semaphoreInfo, nullptr, &renderer->image_available_semaphores_[i]) != VK_SUCCESS ||
+				vkCreateSemaphore(renderer->vkb_device_.device, &semaphoreInfo, nullptr, &renderer->render_finished_semaphores_[i]) != VK_SUCCESS ||
+				vkCreateFence(renderer->vkb_device_.device, &fenceInfo, nullptr, &renderer->in_flight_fences_[i]) != VK_SUCCESS)
+			{
+				return std::unexpected("Vulkan: Failed to create synchronization objects");
+			}
+		}
+
 		logger.log("Vulkan: Initialized (" +
 			std::string(renderer->vkb_physical_device_.properties.deviceName) + ")");
 
 		return renderer;
 	}
 
+	static constexpr int MAX_FRAMES_IN_FLIGHT = 2;
+
 	~Renderer()
 	{
 		if (vkb_device_.device)
 		{
 			vkDeviceWaitIdle(vkb_device_.device);
+		}
+
+		for (size_t i = 0; i < MAX_FRAMES_IN_FLIGHT; ++i)
+		{
+			if (render_finished_semaphores_[i]) vkDestroySemaphore(vkb_device_.device, render_finished_semaphores_[i], nullptr);
+			if (image_available_semaphores_[i]) vkDestroySemaphore(vkb_device_.device, image_available_semaphores_[i], nullptr);
+			if (in_flight_fences_[i]) vkDestroyFence(vkb_device_.device, in_flight_fences_[i], nullptr);
+		}
+
+		if (command_pool_)
+		{
+			vkDestroyCommandPool(vkb_device_.device, command_pool_, nullptr);
+		}
+
+		if (allocator_)
+		{
+			vmaDestroyAllocator(allocator_);
 		}
 
 		for (auto iv : swapchain_image_views_)
@@ -155,6 +227,69 @@ public:
 	VkExtent2D swapchain_extent() const { return vkb_swapchain_.extent; }
 	const std::vector<VkImage>& swapchain_images() const { return swapchain_images_; }
 	const std::vector<VkImageView>& swapchain_image_views() const { return swapchain_image_views_; }
+	VmaAllocator allocator() const { return allocator_; }
+	VkCommandPool command_pool() const { return command_pool_; }
+
+	std::uint32_t current_frame() const { return current_frame_; }
+	std::uint32_t current_image_index() const { return image_index_; }
+
+	void begin_frame()
+	{
+		vkWaitForFences(vkb_device_.device, 1, &in_flight_fences_[current_frame_], VK_TRUE, UINT64_MAX);
+
+		VkResult result = vkAcquireNextImageKHR(
+			vkb_device_.device,
+			vkb_swapchain_.swapchain,
+			UINT64_MAX,
+			image_available_semaphores_[current_frame_],
+			VK_NULL_HANDLE,
+			&image_index_
+		);
+
+		if (result != VK_SUCCESS && result != VK_SUBOPTIMAL_KHR) {
+			logger_.log("Failed to acquire swapchain image!");
+		}
+
+		vkResetFences(vkb_device_.device, 1, &in_flight_fences_[current_frame_]);
+	}
+
+	void end_frame(VkCommandBuffer cmd)
+	{
+		VkSubmitInfo submitInfo{};
+		submitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+
+		VkSemaphore waitSemaphores[] = { image_available_semaphores_[current_frame_] };
+		VkPipelineStageFlags waitStages[] = { VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT };
+		submitInfo.waitSemaphoreCount = 1;
+		submitInfo.pWaitSemaphores = waitSemaphores;
+		submitInfo.pWaitDstStageMask = waitStages;
+
+		submitInfo.commandBufferCount = 1;
+		submitInfo.pCommandBuffers = &cmd;
+
+		VkSemaphore signalSemaphores[] = { render_finished_semaphores_[current_frame_] };
+		submitInfo.signalSemaphoreCount = 1;
+		submitInfo.pSignalSemaphores = signalSemaphores;
+
+		if (vkQueueSubmit(graphics_queue_, 1, &submitInfo, in_flight_fences_[current_frame_]) != VK_SUCCESS) {
+			logger_.log("Failed to submit draw command buffer!");
+		}
+
+		VkPresentInfoKHR presentInfo{};
+		presentInfo.sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR;
+
+		presentInfo.waitSemaphoreCount = 1;
+		presentInfo.pWaitSemaphores = signalSemaphores;
+
+		VkSwapchainKHR swapchains[] = { vkb_swapchain_.swapchain };
+		presentInfo.swapchainCount = 1;
+		presentInfo.pSwapchains = swapchains;
+		presentInfo.pImageIndices = &image_index_;
+
+		vkQueuePresentKHR(present_queue_, &presentInfo);
+
+		current_frame_ = (current_frame_ + 1) % MAX_FRAMES_IN_FLIGHT;
+	}
 
 private:
 	static VKAPI_ATTR VkBool32 VKAPI_CALL debug_callback(
@@ -196,4 +331,14 @@ private:
 
 	std::vector<VkImage> swapchain_images_;
 	std::vector<VkImageView> swapchain_image_views_;
+
+	VmaAllocator allocator_ = VK_NULL_HANDLE;
+	VkCommandPool command_pool_ = VK_NULL_HANDLE;
+
+	VkSemaphore image_available_semaphores_[MAX_FRAMES_IN_FLIGHT]{};
+	VkSemaphore render_finished_semaphores_[MAX_FRAMES_IN_FLIGHT]{};
+	VkFence in_flight_fences_[MAX_FRAMES_IN_FLIGHT]{};
+
+	std::uint32_t current_frame_ = 0;
+	std::uint32_t image_index_ = 0;
 };
