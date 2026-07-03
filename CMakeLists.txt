@@ -45,6 +45,15 @@ if(NOT TARGET vma)
     target_include_directories(vma INTERFACE ${vma_SOURCE_DIR}/include)
 endif()
 
+#vk-bootstrap
+FetchContent_Declare(
+    vk-bootstrap
+    GIT_REPOSITORY https://github.com/charles-lunarg/vk-bootstrap.git
+    GIT_TAG v1.4.350
+    GIT_SHALLOW TRUE
+)
+FetchContent_MakeAvailable(vk-bootstrap)
+
 add_library(lumapy MODULE src/main.cpp src/MpscQueue.hpp src/Logger.hpp src/window.hpp src/Renderer.hpp)
 
 target_link_libraries(lumapy PRIVATE 
@@ -52,6 +61,7 @@ target_link_libraries(lumapy PRIVATE
     glfw
     volk
     vma
+    vk-bootstrap::vk-bootstrap
 )
 set_target_properties(lumapy PROPERTIES PREFIX "${PYTHON_MODULE_PREFIX}" SUFFIX "${PYTHON_MODULE_EXTENSION}")
 
