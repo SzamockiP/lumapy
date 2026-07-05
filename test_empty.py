@@ -5,7 +5,7 @@ engine = lp.Engine()
 
 @engine.onError
 def error(msg):
-    print(f"[LumaPy Error]: {msg}")
+    print(msg)
 
 last_time = time.time()
 frame_count = 0

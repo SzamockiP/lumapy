@@ -56,11 +56,15 @@ public:
 		}
 		renderer->surface_ = surface;
 
-		// Physical Device
+		VkPhysicalDeviceFeatures device_features{
+			.samplerAnisotropy = VK_TRUE
+		};
+
 		auto phys_ret = vkb::PhysicalDeviceSelector{ renderer->vkb_instance_ }
 			.set_surface(surface)
 			.set_minimum_version(1, 3)
 			.prefer_gpu_device_type(vkb::PreferredDeviceType::discrete)
+			.set_required_features(device_features)
 			.select();
 
 		if (!phys_ret)

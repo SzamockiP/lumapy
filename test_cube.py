@@ -20,7 +20,7 @@ engine = lp.Engine()
 
 @engine.onError
 def error(msg):
-    print(f"[LumaPy Error]: {msg}")
+    print(msg)
 
 @engine.onFrame
 def on_update():
