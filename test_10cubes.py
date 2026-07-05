@@ -107,9 +107,18 @@ def on_update():
             for r in range(4):
                 data.append(model[c][r])
                 
+    # lightPos calculation
+    light_pos_vec = glm.vec3(math.sin(current_time) * 10.0, 5.0, math.cos(current_time) * 10.0)
+    
+    # 11th model is the light source (scale it down so it's a small point)
+    light_model = glm.translate(glm.mat4(1.0), light_pos_vec)
+    light_model = glm.scale(light_model, glm.vec3(0.5)) # make it a smaller cube
+    for c in range(4):
+        for r in range(4):
+            data.append(light_model[c][r])
+
     # lightPos (3 floats + 1 pad)
-    light_pos = [math.sin(current_time) * 10.0, 5.0, math.cos(current_time) * 10.0]
-    data.extend([light_pos[0], light_pos[1], light_pos[2], 0.0])
+    data.extend([light_pos_vec.x, light_pos_vec.y, light_pos_vec.z, 0.0])
     
     # viewPos (3 floats + 1 pad)
     data.extend([camera_pos.x, camera_pos.y, camera_pos.z, 0.0])
@@ -184,7 +193,7 @@ if __name__ == "__main__":
     # std140 layout aligns vec3 to 16 bytes (so we treat them as vec4 for sizing)
     ubo_size_bytes = (
         glm.sizeof(glm.mat4) * 2 +  # view, proj
-        glm.sizeof(glm.mat4) * 10 + # models array
+        glm.sizeof(glm.mat4) * 11 + # 10 models + 1 light model
         glm.sizeof(glm.vec4) * 3    # lightPos, viewPos, lightColor
     )
     ubuf = engine.createBuffer(ubo_size_bytes, lp.BufferType.UNIFORM)
@@ -199,8 +208,8 @@ if __name__ == "__main__":
     cmd.bindUniformBuffer(0, ubuf, pipeline)
     cmd.bindVertexBuffer(vbuf)
     cmd.bindIndexBuffer(ibuf)
-    # Draw 36 indices, with 10 instances!
-    cmd.drawIndexedInstanced(36, 10)
+    # Draw 36 indices, with 11 instances (10 cubes + 1 light source)
+    cmd.drawIndexedInstanced(36, 11)
     cmd.endRendering()
 
     engine.run()

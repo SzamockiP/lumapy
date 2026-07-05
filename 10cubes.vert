@@ -7,11 +7,12 @@ layout(location = 2) in vec3 inColor;
 layout(location = 0) out vec3 fragColor;
 layout(location = 1) out vec3 fragNormal;
 layout(location = 2) out vec3 fragPos;
+layout(location = 3) flat out int instanceID;
 
 layout(binding = 0) uniform UBO {
     mat4 view;
     mat4 proj;
-    mat4 models[10];
+    mat4 models[11];
     vec3 lightPos;
     float pad1;
     vec3 viewPos;
@@ -28,4 +29,5 @@ void main() {
     fragPos = worldPos.xyz;
     fragNormal = mat3(model) * inNormal;
     fragColor = inColor;
+    instanceID = gl_InstanceIndex;
 }

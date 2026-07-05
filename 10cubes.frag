@@ -3,13 +3,14 @@
 layout(location = 0) in vec3 fragColor;
 layout(location = 1) in vec3 fragNormal;
 layout(location = 2) in vec3 fragPos;
+layout(location = 3) flat in int instanceID;
 
 layout(location = 0) out vec4 outColor;
 
 layout(binding = 0) uniform UBO {
     mat4 view;
     mat4 proj;
-    mat4 models[10];
+    mat4 models[11];
     vec3 lightPos;
     float pad1;
     vec3 viewPos;
@@ -19,6 +20,12 @@ layout(binding = 0) uniform UBO {
 } ubo;
 
 void main() {
+    if (instanceID == 10) {
+        // Render the light source itself as an unlit, fully bright object
+        outColor = vec4(ubo.lightColor, 1.0);
+        return;
+    }
+
     float ambientStrength = 0.2;
     vec3 ambient = ambientStrength * ubo.lightColor;
     
