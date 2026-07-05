@@ -133,23 +133,41 @@ public:
         return window_->is_key_pressed(key);
     }
 
-    py::object create_buffer(py::list list, BufferType type, DataType dataType) {
+    py::object create_buffer(py::list list, BufferType type, std::optional<DataType> dataType = std::nullopt) {
+        if (list.empty()) {
+            throw std::runtime_error("Cannot create buffer from empty list");
+        }
+
         size_t count = list.size();
+        DataType actualType = DataType::FLOAT;
+
+        if (dataType.has_value()) {
+            actualType = dataType.value();
+        } else {
+            if (py::isinstance<py::float_>(list[0])) {
+                actualType = DataType::FLOAT;
+            } else if (py::isinstance<py::int_>(list[0])) {
+                actualType = (type == BufferType::INDEX) ? DataType::UINT32 : DataType::INT32;
+            } else {
+                throw std::runtime_error("Could not infer data type from list elements");
+            }
+        }
+
         std::expected<std::shared_ptr<Buffer>, std::string> res = std::unexpected("Unknown data type");
 
-        if (dataType == DataType::FLOAT) {
+        if (actualType == DataType::FLOAT) {
             std::vector<float> data(count);
             for(size_t i=0; i<count; ++i) data[i] = list[i].cast<float>();
             res = Buffer::create(*renderer_, data.data(), count * sizeof(float), type);
-        } else if (dataType == DataType::UINT32) {
+        } else if (actualType == DataType::UINT32) {
             std::vector<uint32_t> data(count);
             for(size_t i=0; i<count; ++i) data[i] = list[i].cast<uint32_t>();
             res = Buffer::create(*renderer_, data.data(), count * sizeof(uint32_t), type);
-        } else if (dataType == DataType::UINT16) {
+        } else if (actualType == DataType::UINT16) {
             std::vector<uint16_t> data(count);
             for(size_t i=0; i<count; ++i) data[i] = list[i].cast<uint16_t>();
             res = Buffer::create(*renderer_, data.data(), count * sizeof(uint16_t), type);
-        } else if (dataType == DataType::INT32) {
+        } else if (actualType == DataType::INT32) {
             std::vector<int32_t> data(count);
             for(size_t i=0; i<count; ++i) data[i] = list[i].cast<int32_t>();
             res = Buffer::create(*renderer_, data.data(), count * sizeof(int32_t), type);
@@ -264,7 +282,40 @@ PYBIND11_MODULE(lumapy, m) {
     py::class_<Buffer, std::shared_ptr<Buffer>>(m, "Buffer")
         .def("update", [](Buffer& buffer, std::string_view data) {
             buffer.update(data.data(), data.size());
-        });
+        })
+        .def("update", [](Buffer& buffer, py::list list, std::optional<DataType> dataType = std::nullopt) {
+            if (list.empty()) return;
+            
+            DataType actualType = DataType::FLOAT;
+            if (dataType.has_value()) {
+                actualType = dataType.value();
+            } else {
+                if (py::isinstance<py::float_>(list[0])) {
+                    actualType = DataType::FLOAT;
+                } else if (py::isinstance<py::int_>(list[0])) {
+                    actualType = DataType::INT32;
+                } else {
+                    throw std::runtime_error("Could not infer data type from list elements");
+                }
+            }
+
+            size_t count = list.size();
+            if (actualType == DataType::FLOAT) {
+                std::vector<float> data(count);
+                for(size_t i=0; i<count; ++i) data[i] = list[i].cast<float>();
+                buffer.update(data.data(), count * sizeof(float));
+            } else if (actualType == DataType::UINT32) {
+                std::vector<uint32_t> data(count);
+                for(size_t i=0; i<count; ++i) data[i] = list[i].cast<uint32_t>();
+                buffer.update(data.data(), count * sizeof(uint32_t));
+            } else if (actualType == DataType::INT32) {
+                std::vector<int32_t> data(count);
+                for(size_t i=0; i<count; ++i) data[i] = list[i].cast<int32_t>();
+                buffer.update(data.data(), count * sizeof(int32_t));
+            } else {
+                throw std::runtime_error("Unsupported data type for list update");
+            }
+        }, py::arg("list"), py::arg("dataType") = py::none());
     
     py::class_<ShaderModule, std::shared_ptr<ShaderModule>>(m, "ShaderModule");
 
@@ -315,8 +366,8 @@ PYBIND11_MODULE(lumapy, m) {
         .def("setTitle", &Engine::set_title)
         .def("getMouseState", &Engine::get_mouse_state)
         .def("isKeyPressed", &Engine::is_key_pressed)
-        .def("createBuffer", &Engine::create_buffer)
-        .def("createBuffer", &Engine::create_empty_buffer)
+        .def("createBuffer", &Engine::create_buffer, py::arg("list"), py::arg("type"), py::arg("dataType") = py::none())
+        .def("createBuffer", &Engine::create_empty_buffer, py::arg("size_in_bytes"), py::arg("type"))
         .def("createCommandBuffer", &Engine::create_command_buffer)
         .def("createPipeline", &Engine::create_pipeline)
         .def("compileShader", &Engine::compile_shader)

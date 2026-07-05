@@ -77,7 +77,7 @@ def on_update():
     proj = glm.perspectiveRH_ZO(glm.radians(45.0), 1024.0 / 720.0, 0.1, 100.0)
     proj[1][1] *= -1 
     
-    # We pack the layout(binding = 0) uniform UBO manually into bytes
+    # We pack the layout(binding = 0) uniform UBO manually
     data = []
     
     # view matrix (16 floats) - PyGLM m[i][j] gives column i, row j. 
@@ -117,8 +117,8 @@ def on_update():
     # lightColor (3 floats + 1 pad)
     data.extend([1.0, 0.9, 0.8, 0.0])
     
-    byte_data = struct.pack(f'{len(data)}f', *data)
-    ubuf.update(byte_data)
+    # Update directly with list, API now handles packing!
+    ubuf.update(data)
 
     engine.submit(cmd)
 
@@ -170,12 +170,15 @@ if __name__ == "__main__":
          0.5, -0.5,  0.5,   0.0, -1.0,  0.0,   1.0, 0.0, 1.0,
         -0.5, -0.5,  0.5,   0.0, -1.0,  0.0,   1.0, 0.0, 1.0,
     ]
-    vbuf = engine.createBuffer(vertices, lp.BufferType.VERTEX, lp.DataType.FLOAT)
+    # No more DataType.FLOAT required, inferred automatically!
+    vbuf = engine.createBuffer(vertices, lp.BufferType.VERTEX)
 
     indices = []
     for i in range(6):
         indices.extend([i*4+0, i*4+1, i*4+2, i*4+2, i*4+3, i*4+0])
-    ibuf = engine.createBuffer(indices, lp.BufferType.INDEX, lp.DataType.UINT32)
+    
+    # Automatically inferred as UINT32 for indices
+    ibuf = engine.createBuffer(indices, lp.BufferType.INDEX)
 
     # Calculate UBO size dynamically using glm.sizeof to avoid hardcoding sizes.
     # std140 layout aligns vec3 to 16 bytes (so we treat them as vec4 for sizing)
