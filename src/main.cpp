@@ -12,6 +12,7 @@
 #include "ShaderCompiler.hpp"
 #include "Pipeline.hpp"
 #include "CommandBuffer.hpp"
+#include "Texture.hpp"
 
 namespace py = pybind11;
 
@@ -219,6 +220,16 @@ public:
         }
     }
 
+    py::object load_texture(const std::string& path) {
+        auto res = Texture::create(*renderer_, path);
+        if (res) {
+            return py::cast(res.value());
+        } else {
+            logger_.log(res.error());
+            throw std::runtime_error(res.error());
+        }
+    }
+
     void submit(std::shared_ptr<CommandBuffer> cmd) {
         VkCommandBuffer vkCmd = cmd->get();
         vkResetCommandBuffer(vkCmd, 0);
@@ -323,6 +334,10 @@ PYBIND11_MODULE(lumapy, m) {
     
     py::class_<ShaderModule, std::shared_ptr<ShaderModule>>(m, "ShaderModule");
 
+    py::class_<Texture, std::shared_ptr<Texture>>(m, "Texture")
+        .def_property_readonly("width", &Texture::width)
+        .def_property_readonly("height", &Texture::height);
+
     py::class_<Pipeline, std::shared_ptr<Pipeline>>(m, "Pipeline");
 
     py::class_<PipelineBuilder, std::shared_ptr<PipelineBuilder>>(m, "PipelineBuilder")
@@ -333,6 +348,7 @@ PYBIND11_MODULE(lumapy, m) {
         .def("pushConstant", &PipelineBuilder::pushConstant)
         .def("uniformBuffer", &PipelineBuilder::uniformBuffer)
         .def("storageBuffer", &PipelineBuilder::storageBuffer)
+        .def("texture", &PipelineBuilder::texture)
         .def("build", [](PipelineBuilder& builder) -> py::object {
             auto res = builder.build();
             if (res) {
@@ -358,7 +374,8 @@ PYBIND11_MODULE(lumapy, m) {
             cmd.pushConstants(pipeline, stage, offset, static_cast<uint32_t>(data.size()), data.data());
         })
         .def("bindUniformBuffer", &CommandBuffer::bindUniformBuffer)
-        .def("bindStorageBuffer", &CommandBuffer::bindStorageBuffer);
+        .def("bindStorageBuffer", &CommandBuffer::bindStorageBuffer)
+        .def("bindTexture", &CommandBuffer::bindTexture);
 
     py::class_<Engine>(m, "Engine")
         .def(py::init<>())
@@ -377,5 +394,6 @@ PYBIND11_MODULE(lumapy, m) {
         .def("createCommandBuffer", &Engine::create_command_buffer)
         .def("createPipeline", &Engine::create_pipeline)
         .def("compileShader", &Engine::compile_shader)
+        .def("loadTexture", &Engine::load_texture)
         .def("submit", &Engine::submit);
 }

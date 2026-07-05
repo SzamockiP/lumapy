@@ -150,11 +150,15 @@ public:
     }
 
     PipelineBuilder& uniformBuffer(uint32_t binding, ShaderStage stage) {
-        return descriptorBuffer_(binding, stage, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER);
+        return addDescriptorBinding_(binding, stage, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER);
     }
 
     PipelineBuilder& storageBuffer(uint32_t binding, ShaderStage stage) {
-        return descriptorBuffer_(binding, stage, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER);
+        return addDescriptorBinding_(binding, stage, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER);
+    }
+
+    PipelineBuilder& texture(uint32_t binding, ShaderStage stage) {
+        return addDescriptorBinding_(binding, stage, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER);
     }
 
     std::expected<std::shared_ptr<Pipeline>, std::string> build() {
@@ -384,7 +388,7 @@ public:
     }
 
 private:
-    PipelineBuilder& descriptorBuffer_(uint32_t binding, ShaderStage stage, VkDescriptorType descriptorType) {
+    PipelineBuilder& addDescriptorBinding_(uint32_t binding, ShaderStage stage, VkDescriptorType descriptorType) {
         VkShaderStageFlags stageFlag = (stage == ShaderStage::VERTEX) ? VK_SHADER_STAGE_VERTEX_BIT : VK_SHADER_STAGE_FRAGMENT_BIT;
         
         for (auto& b : descriptor_bindings_) {

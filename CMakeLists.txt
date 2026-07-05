@@ -55,7 +55,16 @@ FetchContent_Declare(
 )
 FetchContent_MakeAvailable(vk-bootstrap)
 
-add_library(lumapy MODULE src/main.cpp src/MpscQueue.hpp src/Logger.hpp src/window.hpp src/Renderer.hpp src/vma_impl.cpp)
+#stb
+FetchContent_Declare(
+    stb
+    GIT_REPOSITORY https://github.com/nothings/stb.git
+    GIT_TAG master
+    GIT_SHALLOW TRUE
+)
+FetchContent_MakeAvailable(stb)
+
+add_library(lumapy MODULE src/main.cpp src/MpscQueue.hpp src/Logger.hpp src/window.hpp src/Renderer.hpp src/vma_impl.cpp src/stb_impl.cpp)
 
 target_link_libraries(lumapy PRIVATE 
     pybind11::module
@@ -65,6 +74,7 @@ target_link_libraries(lumapy PRIVATE
     vk-bootstrap::vk-bootstrap
     Vulkan::shaderc_combined
 )
+target_include_directories(lumapy PRIVATE ${stb_SOURCE_DIR})
 set_target_properties(lumapy PROPERTIES PREFIX "${PYTHON_MODULE_PREFIX}" SUFFIX "${PYTHON_MODULE_EXTENSION}")
 
 target_compile_features(lumapy PRIVATE cxx_std_23)

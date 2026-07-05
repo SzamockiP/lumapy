@@ -8,6 +8,7 @@
 #include "Renderer.hpp"
 #include "Pipeline.hpp"
 #include "Buffer.hpp"
+#include "Texture.hpp"
 
 class CommandBuffer {
 public:
@@ -234,6 +235,34 @@ public:
 
     void bindStorageBuffer(uint32_t binding, std::shared_ptr<Buffer> buffer, std::shared_ptr<Pipeline> pipeline) {
         bindDescriptorBuffer_(binding, buffer, pipeline);
+    }
+
+    void bindTexture(uint32_t binding, std::shared_ptr<Texture> texture, std::shared_ptr<Pipeline> pipeline) {
+        commands_.push_back([binding, texture, pipeline](VkCommandBuffer cmd, Renderer& renderer) {
+            uint32_t frame = renderer.current_frame();
+            VkDescriptorSet descSet = pipeline->descriptor_set(frame);
+            if (descSet == VK_NULL_HANDLE) {
+                throw std::runtime_error("Pipeline has no descriptor set allocated");
+            }
+
+            VkDescriptorImageInfo imageInfo{};
+            imageInfo.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+            imageInfo.imageView = texture->image_view();
+            imageInfo.sampler = texture->sampler();
+
+            VkWriteDescriptorSet descriptorWrite{};
+            descriptorWrite.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+            descriptorWrite.dstSet = descSet;
+            descriptorWrite.dstBinding = binding;
+            descriptorWrite.dstArrayElement = 0;
+            descriptorWrite.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+            descriptorWrite.descriptorCount = 1;
+            descriptorWrite.pImageInfo = &imageInfo;
+
+            vkUpdateDescriptorSets(renderer.device(), 1, &descriptorWrite, 0, nullptr);
+
+            vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline->layout(), 0, 1, &descSet, 0, nullptr);
+        });
     }
 
 private:
