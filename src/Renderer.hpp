@@ -297,9 +297,20 @@ public:
 
 	std::uint32_t current_frame() const { return current_frame_; }
 	std::uint32_t current_image_index() const { return image_index_; }
+	bool frame_skipped() const { return frame_skipped_; }
 
 	void begin_frame()
 	{
+		frame_skipped_ = false;
+
+		// Wait while minimized
+		int width = 0, height = 0;
+		window_.get_framebuffer_size(width, height);
+		while (width == 0 || height == 0) {
+			window_.get_framebuffer_size(width, height);
+			glfwWaitEvents();
+		}
+
 		vkWaitForFences(vkb_device_.device, 1, &in_flight_fences_[current_frame_], VK_TRUE, UINT64_MAX);
 
 		VkResult result = vkAcquireNextImageKHR(
@@ -311,7 +322,11 @@ public:
 			&image_index_
 		);
 
-		if (result != VK_SUCCESS && result != VK_SUBOPTIMAL_KHR) {
+		if (result == VK_ERROR_OUT_OF_DATE_KHR) {
+			recreate_swapchain();
+			frame_skipped_ = true;
+			return;
+		} else if (result != VK_SUCCESS && result != VK_SUBOPTIMAL_KHR) {
 			logger_.log("Failed to acquire swapchain image!");
 		}
 
@@ -351,7 +366,12 @@ public:
 		presentInfo.pSwapchains = swapchains;
 		presentInfo.pImageIndices = &image_index_;
 
-		vkQueuePresentKHR(present_queue_, &presentInfo);
+		VkResult result = vkQueuePresentKHR(present_queue_, &presentInfo);
+
+		if (result == VK_ERROR_OUT_OF_DATE_KHR || result == VK_SUBOPTIMAL_KHR || window_.was_framebuffer_resized()) {
+			window_.reset_framebuffer_resized();
+			recreate_swapchain();
+		}
 
 		current_frame_ = (current_frame_ + 1) % MAX_FRAMES_IN_FLIGHT;
 	}
@@ -411,4 +431,105 @@ private:
 	VmaAllocation depth_image_allocation_ = VK_NULL_HANDLE;
 	VkImageView depth_image_view_ = VK_NULL_HANDLE;
 	VkFormat depth_format_ = VK_FORMAT_UNDEFINED;
+
+	bool frame_skipped_ = false;
+
+	void recreate_swapchain()
+	{
+		vkDeviceWaitIdle(vkb_device_.device);
+
+		// Destroy old depth resources
+		if (depth_image_view_) {
+			vkDestroyImageView(vkb_device_.device, depth_image_view_, nullptr);
+			depth_image_view_ = VK_NULL_HANDLE;
+		}
+		if (depth_image_ && depth_image_allocation_) {
+			vmaDestroyImage(allocator_, depth_image_, depth_image_allocation_);
+			depth_image_ = VK_NULL_HANDLE;
+			depth_image_allocation_ = VK_NULL_HANDLE;
+		}
+
+		// Destroy old render-finished semaphores
+		for (auto sem : render_finished_semaphores_) {
+			if (sem) vkDestroySemaphore(vkb_device_.device, sem, nullptr);
+		}
+		render_finished_semaphores_.clear();
+
+		// Destroy old swapchain image views
+		for (auto iv : swapchain_image_views_) {
+			vkDestroyImageView(vkb_device_.device, iv, nullptr);
+		}
+		swapchain_image_views_.clear();
+		swapchain_images_.clear();
+
+		// Recreate swapchain (vk-bootstrap reuses old swapchain internally)
+		auto sc_ret = vkb::SwapchainBuilder{ vkb_device_ }
+			.set_old_swapchain(vkb_swapchain_)
+			.set_desired_present_mode(VK_PRESENT_MODE_MAILBOX_KHR)
+			.add_fallback_present_mode(VK_PRESENT_MODE_FIFO_KHR)
+			.build();
+
+		if (!sc_ret) {
+			logger_.log("Failed to recreate swapchain: " + sc_ret.error().message());
+			return;
+		}
+
+		vkb::destroy_swapchain(vkb_swapchain_);
+		vkb_swapchain_ = sc_ret.value();
+		swapchain_images_ = vkb_swapchain_.get_images().value();
+		swapchain_image_views_ = vkb_swapchain_.get_image_views().value();
+
+		// Recreate render-finished semaphores (one per swapchain image)
+		VkSemaphoreCreateInfo semaphoreInfo{};
+		semaphoreInfo.sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO;
+		render_finished_semaphores_.resize(swapchain_images_.size());
+		for (size_t i = 0; i < swapchain_images_.size(); i++) {
+			if (vkCreateSemaphore(vkb_device_.device, &semaphoreInfo, nullptr, &render_finished_semaphores_[i]) != VK_SUCCESS) {
+				logger_.log("Failed to recreate render finished semaphores");
+				return;
+			}
+		}
+
+		// Recreate depth image
+		VkImageCreateInfo imageInfo = {};
+		imageInfo.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
+		imageInfo.imageType = VK_IMAGE_TYPE_2D;
+		imageInfo.extent.width = vkb_swapchain_.extent.width;
+		imageInfo.extent.height = vkb_swapchain_.extent.height;
+		imageInfo.extent.depth = 1;
+		imageInfo.mipLevels = 1;
+		imageInfo.arrayLayers = 1;
+		imageInfo.format = depth_format_;
+		imageInfo.tiling = VK_IMAGE_TILING_OPTIMAL;
+		imageInfo.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+		imageInfo.usage = VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT;
+		imageInfo.samples = VK_SAMPLE_COUNT_1_BIT;
+		imageInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+
+		VmaAllocationCreateInfo allocImageInfo = {};
+		allocImageInfo.usage = VMA_MEMORY_USAGE_AUTO;
+
+		if (vmaCreateImage(allocator_, &imageInfo, &allocImageInfo, &depth_image_, &depth_image_allocation_, nullptr) != VK_SUCCESS) {
+			logger_.log("Failed to recreate depth image");
+			return;
+		}
+
+		VkImageViewCreateInfo viewInfo = {};
+		viewInfo.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+		viewInfo.image = depth_image_;
+		viewInfo.viewType = VK_IMAGE_VIEW_TYPE_2D;
+		viewInfo.format = depth_format_;
+		viewInfo.subresourceRange.aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT;
+		viewInfo.subresourceRange.baseMipLevel = 0;
+		viewInfo.subresourceRange.levelCount = 1;
+		viewInfo.subresourceRange.baseArrayLayer = 0;
+		viewInfo.subresourceRange.layerCount = 1;
+
+		if (vkCreateImageView(vkb_device_.device, &viewInfo, nullptr, &depth_image_view_) != VK_SUCCESS) {
+			logger_.log("Failed to recreate depth image view");
+			return;
+		}
+
+		logger_.log("Swapchain recreated (" + std::to_string(vkb_swapchain_.extent.width) + "x" + std::to_string(vkb_swapchain_.extent.height) + ")");
+	}
 };

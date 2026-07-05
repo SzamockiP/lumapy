@@ -74,6 +74,10 @@ public:
                     }
                     
                     renderer_->begin_frame();
+
+                    if (renderer_->frame_skipped()) {
+                        continue;
+                    }
                     
                     if (!app_instance.is_none()) {
                         frame_function_(app_instance);

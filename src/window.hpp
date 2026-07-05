@@ -42,7 +42,7 @@ public:
         }
 
         glfwWindowHint(GLFW_CLIENT_API, GLFW_NO_API);
-        glfwWindowHint(GLFW_RESIZABLE, GLFW_FALSE);
+        glfwWindowHint(GLFW_RESIZABLE, GLFW_TRUE);
 
         GLFWwindow* raw_window = glfwCreateWindow(width, height, title.c_str(), nullptr, nullptr);
         if (!raw_window)
@@ -56,6 +56,7 @@ public:
 
         glfwSetWindowUserPointer(window->window_.get(), window.get());
         glfwSetCursorPosCallback(window->window_.get(), mouse_callback);
+        glfwSetFramebufferSizeCallback(window->window_.get(), framebuffer_resize_callback);
 
         glfwSetInputMode(window->window_.get(), GLFW_CURSOR, GLFW_CURSOR_DISABLED);
 
@@ -105,6 +106,17 @@ private:
     std::string title_;
 
     MouseState mouse_;
+    bool framebuffer_resized_ = false;
+
+public:
+    bool was_framebuffer_resized() const { return framebuffer_resized_; }
+    void reset_framebuffer_resized() { framebuffer_resized_ = false; }
+
+    void get_framebuffer_size(int& width, int& height) const {
+        glfwGetFramebufferSize(window_.get(), &width, &height);
+    }
+
+private:
 
 
     static void mouse_callback(GLFWwindow* window, double xpos, double ypos)
@@ -128,5 +140,14 @@ private:
 
         win->mouse_.last_x = fx;
         win->mouse_.last_y = fy;
+    };
+
+    static void framebuffer_resize_callback(GLFWwindow* window, int width, int height)
+    {
+        Window* win = static_cast<Window*>(glfwGetWindowUserPointer(window));
+        if (win)
+        {
+            win->framebuffer_resized_ = true;
+        }
     };
 };
