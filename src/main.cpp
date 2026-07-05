@@ -1,6 +1,7 @@
 #include <pybind11/pybind11.h>
 #include <pybind11/functional.h>
 #include <pybind11/stl.h>
+#include <pybind11/numpy.h>
 #include <print>
 #include <atomic>
 #include <expected>
@@ -138,6 +139,16 @@ public:
         return window_->is_key_pressed(key);
     }
 
+    bool is_mouse_button_pressed(int button) const
+    {
+        return window_->is_mouse_button_pressed(button);
+    }
+
+    void set_cursor_mode(int mode)
+    {
+        window_->set_cursor_mode(mode);
+    }
+
     py::object create_buffer(py::list list, BufferType type, std::optional<DataType> dataType = std::nullopt) {
         if (list.empty()) {
             throw std::runtime_error("Cannot create buffer from empty list");
@@ -178,6 +189,17 @@ public:
             res = Buffer::create(*renderer_, data.data(), count * sizeof(int32_t), type);
         }
 
+        if (res) {
+            return py::cast(res.value());
+        } else {
+            logger_.log(res.error());
+            throw std::runtime_error(res.error());
+        }
+    }
+
+    py::object create_buffer_from_numpy(py::buffer b, BufferType type) {
+        py::buffer_info info = b.request();
+        auto res = Buffer::create(*renderer_, info.ptr, info.size * info.itemsize, type);
         if (res) {
             return py::cast(res.value());
         } else {
@@ -293,6 +315,18 @@ PYBIND11_MODULE(lumapy, m) {
         .value("FLOAT4", Format::FLOAT4)
         .export_values();
 
+    py::enum_<CullMode>(m, "CullMode")
+        .value("NONE", CullMode::NONE)
+        .value("BACK", CullMode::BACK)
+        .value("FRONT", CullMode::FRONT)
+        .value("FRONT_AND_BACK", CullMode::FRONT_AND_BACK)
+        .export_values();
+
+    py::enum_<FrontFace>(m, "FrontFace")
+        .value("CLOCKWISE", FrontFace::CLOCKWISE)
+        .value("COUNTER_CLOCKWISE", FrontFace::COUNTER_CLOCKWISE)
+        .export_values();
+
     py::class_<MouseState>(m, "MouseState")
         .def_readonly("dx", &MouseState::dx)
         .def_readonly("dy", &MouseState::dy);
@@ -300,6 +334,10 @@ PYBIND11_MODULE(lumapy, m) {
     py::class_<Buffer, std::shared_ptr<Buffer>>(m, "Buffer")
         .def("update", [](Buffer& buffer, std::string_view data) {
             buffer.update(data.data(), data.size());
+        })
+        .def("update", [](Buffer& buffer, py::buffer b) {
+            py::buffer_info info = b.request();
+            buffer.update(info.ptr, info.size * info.itemsize);
         })
         .def("update", [](Buffer& buffer, py::list list, std::optional<DataType> dataType = std::nullopt) {
             if (list.empty()) return;
@@ -348,6 +386,8 @@ PYBIND11_MODULE(lumapy, m) {
         .def("fragmentShader", &PipelineBuilder::fragmentShader)
         .def("vertexFormat", &PipelineBuilder::vertexFormat)
         .def("depthTest", &PipelineBuilder::depthTest)
+        .def("cullMode", &PipelineBuilder::cullMode)
+        .def("blend", &PipelineBuilder::blend)
         .def("pushConstant", &PipelineBuilder::pushConstant)
         .def("uniformBuffer", &PipelineBuilder::uniformBuffer)
         .def("storageBuffer", &PipelineBuilder::storageBuffer)
@@ -392,11 +432,144 @@ PYBIND11_MODULE(lumapy, m) {
         .def("setTitle", &Engine::set_title)
         .def("getMouseState", &Engine::get_mouse_state)
         .def("isKeyPressed", &Engine::is_key_pressed)
+        .def("isMouseButtonPressed", &Engine::is_mouse_button_pressed)
+        .def("setCursorMode", &Engine::set_cursor_mode)
         .def("createBuffer", &Engine::create_buffer, py::arg("list"), py::arg("type"), py::arg("dataType") = py::none())
+        .def("createBuffer", &Engine::create_buffer_from_numpy, py::arg("array"), py::arg("type"))
         .def("createBuffer", &Engine::create_empty_buffer, py::arg("size_in_bytes"), py::arg("type"))
         .def("createCommandBuffer", &Engine::create_command_buffer)
         .def("createPipeline", &Engine::create_pipeline)
         .def("compileShader", &Engine::compile_shader)
         .def("loadTexture", &Engine::load_texture)
         .def("submit", &Engine::submit);
+
+    m.attr("KEY_SPACE") = GLFW_KEY_SPACE;
+    m.attr("KEY_APOSTROPHE") = GLFW_KEY_APOSTROPHE;
+    m.attr("KEY_COMMA") = GLFW_KEY_COMMA;
+    m.attr("KEY_MINUS") = GLFW_KEY_MINUS;
+    m.attr("KEY_PERIOD") = GLFW_KEY_PERIOD;
+    m.attr("KEY_SLASH") = GLFW_KEY_SLASH;
+    m.attr("KEY_0") = GLFW_KEY_0;
+    m.attr("KEY_1") = GLFW_KEY_1;
+    m.attr("KEY_2") = GLFW_KEY_2;
+    m.attr("KEY_3") = GLFW_KEY_3;
+    m.attr("KEY_4") = GLFW_KEY_4;
+    m.attr("KEY_5") = GLFW_KEY_5;
+    m.attr("KEY_6") = GLFW_KEY_6;
+    m.attr("KEY_7") = GLFW_KEY_7;
+    m.attr("KEY_8") = GLFW_KEY_8;
+    m.attr("KEY_9") = GLFW_KEY_9;
+    m.attr("KEY_SEMICOLON") = GLFW_KEY_SEMICOLON;
+    m.attr("KEY_EQUAL") = GLFW_KEY_EQUAL;
+    m.attr("KEY_A") = GLFW_KEY_A;
+    m.attr("KEY_B") = GLFW_KEY_B;
+    m.attr("KEY_C") = GLFW_KEY_C;
+    m.attr("KEY_D") = GLFW_KEY_D;
+    m.attr("KEY_E") = GLFW_KEY_E;
+    m.attr("KEY_F") = GLFW_KEY_F;
+    m.attr("KEY_G") = GLFW_KEY_G;
+    m.attr("KEY_H") = GLFW_KEY_H;
+    m.attr("KEY_I") = GLFW_KEY_I;
+    m.attr("KEY_J") = GLFW_KEY_J;
+    m.attr("KEY_K") = GLFW_KEY_K;
+    m.attr("KEY_L") = GLFW_KEY_L;
+    m.attr("KEY_M") = GLFW_KEY_M;
+    m.attr("KEY_N") = GLFW_KEY_N;
+    m.attr("KEY_O") = GLFW_KEY_O;
+    m.attr("KEY_P") = GLFW_KEY_P;
+    m.attr("KEY_Q") = GLFW_KEY_Q;
+    m.attr("KEY_R") = GLFW_KEY_R;
+    m.attr("KEY_S") = GLFW_KEY_S;
+    m.attr("KEY_T") = GLFW_KEY_T;
+    m.attr("KEY_U") = GLFW_KEY_U;
+    m.attr("KEY_V") = GLFW_KEY_V;
+    m.attr("KEY_W") = GLFW_KEY_W;
+    m.attr("KEY_X") = GLFW_KEY_X;
+    m.attr("KEY_Y") = GLFW_KEY_Y;
+    m.attr("KEY_Z") = GLFW_KEY_Z;
+    m.attr("KEY_LEFT_BRACKET") = GLFW_KEY_LEFT_BRACKET;
+    m.attr("KEY_BACKSLASH") = GLFW_KEY_BACKSLASH;
+    m.attr("KEY_RIGHT_BRACKET") = GLFW_KEY_RIGHT_BRACKET;
+    m.attr("KEY_GRAVE_ACCENT") = GLFW_KEY_GRAVE_ACCENT;
+    m.attr("KEY_WORLD_1") = GLFW_KEY_WORLD_1;
+    m.attr("KEY_WORLD_2") = GLFW_KEY_WORLD_2;
+    m.attr("KEY_ESCAPE") = GLFW_KEY_ESCAPE;
+    m.attr("KEY_ENTER") = GLFW_KEY_ENTER;
+    m.attr("KEY_TAB") = GLFW_KEY_TAB;
+    m.attr("KEY_BACKSPACE") = GLFW_KEY_BACKSPACE;
+    m.attr("KEY_INSERT") = GLFW_KEY_INSERT;
+    m.attr("KEY_DELETE") = GLFW_KEY_DELETE;
+    m.attr("KEY_RIGHT") = GLFW_KEY_RIGHT;
+    m.attr("KEY_LEFT") = GLFW_KEY_LEFT;
+    m.attr("KEY_DOWN") = GLFW_KEY_DOWN;
+    m.attr("KEY_UP") = GLFW_KEY_UP;
+    m.attr("KEY_PAGE_UP") = GLFW_KEY_PAGE_UP;
+    m.attr("KEY_PAGE_DOWN") = GLFW_KEY_PAGE_DOWN;
+    m.attr("KEY_HOME") = GLFW_KEY_HOME;
+    m.attr("KEY_END") = GLFW_KEY_END;
+    m.attr("KEY_CAPS_LOCK") = GLFW_KEY_CAPS_LOCK;
+    m.attr("KEY_SCROLL_LOCK") = GLFW_KEY_SCROLL_LOCK;
+    m.attr("KEY_NUM_LOCK") = GLFW_KEY_NUM_LOCK;
+    m.attr("KEY_PRINT_SCREEN") = GLFW_KEY_PRINT_SCREEN;
+    m.attr("KEY_PAUSE") = GLFW_KEY_PAUSE;
+    m.attr("KEY_F1") = GLFW_KEY_F1;
+    m.attr("KEY_F2") = GLFW_KEY_F2;
+    m.attr("KEY_F3") = GLFW_KEY_F3;
+    m.attr("KEY_F4") = GLFW_KEY_F4;
+    m.attr("KEY_F5") = GLFW_KEY_F5;
+    m.attr("KEY_F6") = GLFW_KEY_F6;
+    m.attr("KEY_F7") = GLFW_KEY_F7;
+    m.attr("KEY_F8") = GLFW_KEY_F8;
+    m.attr("KEY_F9") = GLFW_KEY_F9;
+    m.attr("KEY_F10") = GLFW_KEY_F10;
+    m.attr("KEY_F11") = GLFW_KEY_F11;
+    m.attr("KEY_F12") = GLFW_KEY_F12;
+    m.attr("KEY_F13") = GLFW_KEY_F13;
+    m.attr("KEY_F14") = GLFW_KEY_F14;
+    m.attr("KEY_F15") = GLFW_KEY_F15;
+    m.attr("KEY_F16") = GLFW_KEY_F16;
+    m.attr("KEY_F17") = GLFW_KEY_F17;
+    m.attr("KEY_F18") = GLFW_KEY_F18;
+    m.attr("KEY_F19") = GLFW_KEY_F19;
+    m.attr("KEY_F20") = GLFW_KEY_F20;
+    m.attr("KEY_F21") = GLFW_KEY_F21;
+    m.attr("KEY_F22") = GLFW_KEY_F22;
+    m.attr("KEY_F23") = GLFW_KEY_F23;
+    m.attr("KEY_F24") = GLFW_KEY_F24;
+    m.attr("KEY_F25") = GLFW_KEY_F25;
+    m.attr("KEY_KP_0") = GLFW_KEY_KP_0;
+    m.attr("KEY_KP_1") = GLFW_KEY_KP_1;
+    m.attr("KEY_KP_2") = GLFW_KEY_KP_2;
+    m.attr("KEY_KP_3") = GLFW_KEY_KP_3;
+    m.attr("KEY_KP_4") = GLFW_KEY_KP_4;
+    m.attr("KEY_KP_5") = GLFW_KEY_KP_5;
+    m.attr("KEY_KP_6") = GLFW_KEY_KP_6;
+    m.attr("KEY_KP_7") = GLFW_KEY_KP_7;
+    m.attr("KEY_KP_8") = GLFW_KEY_KP_8;
+    m.attr("KEY_KP_9") = GLFW_KEY_KP_9;
+    m.attr("KEY_KP_DECIMAL") = GLFW_KEY_KP_DECIMAL;
+    m.attr("KEY_KP_DIVIDE") = GLFW_KEY_KP_DIVIDE;
+    m.attr("KEY_KP_MULTIPLY") = GLFW_KEY_KP_MULTIPLY;
+    m.attr("KEY_KP_SUBTRACT") = GLFW_KEY_KP_SUBTRACT;
+    m.attr("KEY_KP_ADD") = GLFW_KEY_KP_ADD;
+    m.attr("KEY_KP_ENTER") = GLFW_KEY_KP_ENTER;
+    m.attr("KEY_KP_EQUAL") = GLFW_KEY_KP_EQUAL;
+    m.attr("KEY_LEFT_SHIFT") = GLFW_KEY_LEFT_SHIFT;
+    m.attr("KEY_LEFT_CONTROL") = GLFW_KEY_LEFT_CONTROL;
+    m.attr("KEY_LEFT_ALT") = GLFW_KEY_LEFT_ALT;
+    m.attr("KEY_LEFT_SUPER") = GLFW_KEY_LEFT_SUPER;
+    m.attr("KEY_RIGHT_SHIFT") = GLFW_KEY_RIGHT_SHIFT;
+    m.attr("KEY_RIGHT_CONTROL") = GLFW_KEY_RIGHT_CONTROL;
+    m.attr("KEY_RIGHT_ALT") = GLFW_KEY_RIGHT_ALT;
+    m.attr("KEY_RIGHT_SUPER") = GLFW_KEY_RIGHT_SUPER;
+    m.attr("KEY_MENU") = GLFW_KEY_MENU;
+    m.attr("KEY_LAST") = GLFW_KEY_LAST;
+ 
+    m.attr("MOUSE_BUTTON_LEFT") = GLFW_MOUSE_BUTTON_LEFT;
+    m.attr("MOUSE_BUTTON_RIGHT") = GLFW_MOUSE_BUTTON_RIGHT;
+    m.attr("MOUSE_BUTTON_MIDDLE") = GLFW_MOUSE_BUTTON_MIDDLE;
+
+    m.attr("CURSOR_NORMAL") = GLFW_CURSOR_NORMAL;
+    m.attr("CURSOR_DISABLED") = GLFW_CURSOR_DISABLED;
+    m.attr("CURSOR_HIDDEN") = GLFW_CURSOR_HIDDEN;
 }

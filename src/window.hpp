@@ -82,6 +82,16 @@ public:
         return glfwGetKey(window_.get(), key) == GLFW_PRESS;
     }
 
+    bool is_mouse_button_pressed(int button) const
+    {
+        return glfwGetMouseButton(window_.get(), button) == GLFW_PRESS;
+    }
+
+    void set_cursor_mode(int mode)
+    {
+        glfwSetInputMode(window_.get(), GLFW_CURSOR, mode);
+    }
+
     MouseState get_mouse_state() const
     {
         return mouse_;

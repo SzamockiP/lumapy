@@ -15,6 +15,18 @@ enum class Format {
     FLOAT4
 };
 
+enum class CullMode {
+    NONE,
+    BACK,
+    FRONT,
+    FRONT_AND_BACK
+};
+
+enum class FrontFace {
+    CLOCKWISE,
+    COUNTER_CLOCKWISE
+};
+
 class Pipeline {
 public:
     // Maps binding index -> VkDescriptorType so CommandBuffer knows what type to write
@@ -137,6 +149,17 @@ public:
 
     PipelineBuilder& depthTest(bool enable) {
         depth_test_ = enable;
+        return *this;
+    }
+
+    PipelineBuilder& cullMode(CullMode mode, FrontFace frontFace) {
+        cull_mode_ = mode;
+        front_face_ = frontFace;
+        return *this;
+    }
+
+    PipelineBuilder& blend(bool enable) {
+        blend_enable_ = enable;
         return *this;
     }
 
@@ -329,6 +352,13 @@ public:
             .pScissors = nullptr
         };
 
+        VkCullModeFlags vkCullMode = VK_CULL_MODE_NONE;
+        if (cull_mode_ == CullMode::BACK) vkCullMode = VK_CULL_MODE_BACK_BIT;
+        else if (cull_mode_ == CullMode::FRONT) vkCullMode = VK_CULL_MODE_FRONT_BIT;
+        else if (cull_mode_ == CullMode::FRONT_AND_BACK) vkCullMode = VK_CULL_MODE_FRONT_AND_BACK;
+
+        VkFrontFace vkFrontFace = (front_face_ == FrontFace::CLOCKWISE) ? VK_FRONT_FACE_CLOCKWISE : VK_FRONT_FACE_COUNTER_CLOCKWISE;
+
         VkPipelineRasterizationStateCreateInfo rasterizer{
             .sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO,
             .pNext = nullptr,
@@ -336,8 +366,8 @@ public:
             .depthClampEnable = VK_FALSE,
             .rasterizerDiscardEnable = VK_FALSE,
             .polygonMode = VK_POLYGON_MODE_FILL,
-            .cullMode = VK_CULL_MODE_BACK_BIT,
-            .frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE,
+            .cullMode = vkCullMode,
+            .frontFace = vkFrontFace,
             .depthBiasEnable = VK_FALSE,
             .depthBiasConstantFactor = 0.0f,
             .depthBiasClamp = 0.0f,
@@ -358,12 +388,12 @@ public:
         };
 
         VkPipelineColorBlendAttachmentState colorBlendAttachment{
-            .blendEnable = VK_FALSE,
-            .srcColorBlendFactor = VK_BLEND_FACTOR_ZERO,
-            .dstColorBlendFactor = VK_BLEND_FACTOR_ZERO,
+            .blendEnable = blend_enable_ ? VK_TRUE : VK_FALSE,
+            .srcColorBlendFactor = blend_enable_ ? VK_BLEND_FACTOR_SRC_ALPHA : VK_BLEND_FACTOR_ONE,
+            .dstColorBlendFactor = blend_enable_ ? VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA : VK_BLEND_FACTOR_ZERO,
             .colorBlendOp = VK_BLEND_OP_ADD,
-            .srcAlphaBlendFactor = VK_BLEND_FACTOR_ZERO,
-            .dstAlphaBlendFactor = VK_BLEND_FACTOR_ZERO,
+            .srcAlphaBlendFactor = blend_enable_ ? VK_BLEND_FACTOR_ONE : VK_BLEND_FACTOR_ONE,
+            .dstAlphaBlendFactor = blend_enable_ ? VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA : VK_BLEND_FACTOR_ZERO,
             .alphaBlendOp = VK_BLEND_OP_ADD,
             .colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT | VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT
         };
@@ -489,6 +519,9 @@ private:
     std::shared_ptr<ShaderModule> fragment_shader_;
     std::vector<Format> formats_;
     bool depth_test_ = false;
+    CullMode cull_mode_ = CullMode::BACK;
+    FrontFace front_face_ = FrontFace::COUNTER_CLOCKWISE;
+    bool blend_enable_ = false;
     std::vector<VkPushConstantRange> push_constant_ranges_;
     std::vector<VkDescriptorSetLayoutBinding> descriptor_bindings_;
 };
