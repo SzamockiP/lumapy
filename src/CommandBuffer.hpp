@@ -15,11 +15,13 @@ public:
     static std::expected<std::shared_ptr<CommandBuffer>, std::string> create(Renderer& renderer) {
         auto cmd = std::shared_ptr<CommandBuffer>(new CommandBuffer(renderer));
         
-        VkCommandBufferAllocateInfo allocInfo{};
-        allocInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
-        allocInfo.commandPool = renderer.command_pool();
-        allocInfo.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
-        allocInfo.commandBufferCount = Renderer::MAX_FRAMES_IN_FLIGHT;
+        VkCommandBufferAllocateInfo allocInfo{
+            .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
+            .pNext = nullptr,
+            .commandPool = renderer.command_pool(),
+            .level = VK_COMMAND_BUFFER_LEVEL_PRIMARY,
+            .commandBufferCount = Renderer::MAX_FRAMES_IN_FLIGHT
+        };
 
         if (vkAllocateCommandBuffers(renderer.device(), &allocInfo, cmd->command_buffers_.data()) != VK_SUCCESS) {
             return std::unexpected("Failed to allocate command buffers!");
@@ -48,20 +50,24 @@ public:
             cc[0] = clear_color[0]; cc[1] = clear_color[1]; cc[2] = clear_color[2]; cc[3] = clear_color[3];
         }
         commands_.push_back([cc](VkCommandBuffer cmd, Renderer& renderer) {
-            VkImageMemoryBarrier barrier{};
-            barrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
-            barrier.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-            barrier.newLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
-            barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-            barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-            barrier.image = renderer.swapchain_images()[renderer.current_image_index()];
-            barrier.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-            barrier.subresourceRange.baseMipLevel = 0;
-            barrier.subresourceRange.levelCount = 1;
-            barrier.subresourceRange.baseArrayLayer = 0;
-            barrier.subresourceRange.layerCount = 1;
-            barrier.srcAccessMask = 0;
-            barrier.dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+            VkImageMemoryBarrier barrier{
+                .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
+                .pNext = nullptr,
+                .srcAccessMask = 0,
+                .dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
+                .oldLayout = VK_IMAGE_LAYOUT_UNDEFINED,
+                .newLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+                .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+                .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+                .image = renderer.swapchain_images()[renderer.current_image_index()],
+                .subresourceRange = {
+                    .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
+                    .baseMipLevel = 0,
+                    .levelCount = 1,
+                    .baseArrayLayer = 0,
+                    .layerCount = 1
+                }
+            };
 
             vkCmdPipelineBarrier(
                 cmd,
@@ -73,20 +79,24 @@ public:
             );
 
             if (renderer.depth_image() != VK_NULL_HANDLE) {
-                VkImageMemoryBarrier depthBarrier{};
-                depthBarrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
-                depthBarrier.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-                depthBarrier.newLayout = VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL;
-                depthBarrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-                depthBarrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-                depthBarrier.image = renderer.depth_image();
-                depthBarrier.subresourceRange.aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT;
-                depthBarrier.subresourceRange.baseMipLevel = 0;
-                depthBarrier.subresourceRange.levelCount = 1;
-                depthBarrier.subresourceRange.baseArrayLayer = 0;
-                depthBarrier.subresourceRange.layerCount = 1;
-                depthBarrier.srcAccessMask = 0;
-                depthBarrier.dstAccessMask = VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
+                VkImageMemoryBarrier depthBarrier{
+                    .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
+                    .pNext = nullptr,
+                    .srcAccessMask = 0,
+                    .dstAccessMask = VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
+                    .oldLayout = VK_IMAGE_LAYOUT_UNDEFINED,
+                    .newLayout = VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL,
+                    .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+                    .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+                    .image = renderer.depth_image(),
+                    .subresourceRange = {
+                        .aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT,
+                        .baseMipLevel = 0,
+                        .levelCount = 1,
+                        .baseArrayLayer = 0,
+                        .layerCount = 1
+                    }
+                };
 
                 vkCmdPipelineBarrier(
                     cmd,
@@ -98,34 +108,44 @@ public:
                 );
             }
 
-            VkRenderingAttachmentInfo colorAttachment{};
-            colorAttachment.sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO;
-            colorAttachment.imageView = renderer.swapchain_image_views()[renderer.current_image_index()];
-            colorAttachment.imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
-            colorAttachment.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
-            colorAttachment.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
-            colorAttachment.clearValue.color = {cc[0], cc[1], cc[2], cc[3]};
+            VkRenderingAttachmentInfo colorAttachment{
+                .sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO,
+                .pNext = nullptr,
+                .imageView = renderer.swapchain_image_views()[renderer.current_image_index()],
+                .imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+                .resolveMode = VK_RESOLVE_MODE_NONE,
+                .resolveImageView = VK_NULL_HANDLE,
+                .resolveImageLayout = VK_IMAGE_LAYOUT_UNDEFINED,
+                .loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR,
+                .storeOp = VK_ATTACHMENT_STORE_OP_STORE,
+                .clearValue = { .color = { { cc[0], cc[1], cc[2], cc[3] } } }
+            };
 
-            VkRenderingAttachmentInfo depthAttachment{};
-            if (renderer.depth_image_view() != VK_NULL_HANDLE) {
-                depthAttachment.sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO;
-                depthAttachment.imageView = renderer.depth_image_view();
-                depthAttachment.imageLayout = VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL;
-                depthAttachment.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
-                depthAttachment.storeOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
-                depthAttachment.clearValue.depthStencil = {1.0f, 0};
-            }
+            VkRenderingAttachmentInfo depthAttachment{
+                .sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO,
+                .pNext = nullptr,
+                .imageView = renderer.depth_image_view(),
+                .imageLayout = VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL,
+                .resolveMode = VK_RESOLVE_MODE_NONE,
+                .resolveImageView = VK_NULL_HANDLE,
+                .resolveImageLayout = VK_IMAGE_LAYOUT_UNDEFINED,
+                .loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR,
+                .storeOp = VK_ATTACHMENT_STORE_OP_DONT_CARE,
+                .clearValue = { .depthStencil = { 1.0f, 0 } }
+            };
 
-            VkRenderingInfo renderingInfo{};
-            renderingInfo.sType = VK_STRUCTURE_TYPE_RENDERING_INFO;
-            renderingInfo.renderArea.offset = {0, 0};
-            renderingInfo.renderArea.extent = renderer.swapchain_extent();
-            renderingInfo.layerCount = 1;
-            renderingInfo.colorAttachmentCount = 1;
-            renderingInfo.pColorAttachments = &colorAttachment;
-            if (renderer.depth_image_view() != VK_NULL_HANDLE) {
-                renderingInfo.pDepthAttachment = &depthAttachment;
-            }
+            VkRenderingInfo renderingInfo{
+                .sType = VK_STRUCTURE_TYPE_RENDERING_INFO,
+                .pNext = nullptr,
+                .flags = 0,
+                .renderArea = { {0, 0}, renderer.swapchain_extent() },
+                .layerCount = 1,
+                .viewMask = 0,
+                .colorAttachmentCount = 1,
+                .pColorAttachments = &colorAttachment,
+                .pDepthAttachment = renderer.depth_image_view() != VK_NULL_HANDLE ? &depthAttachment : nullptr,
+                .pStencilAttachment = nullptr
+            };
 
             vkCmdBeginRendering(cmd, &renderingInfo);
         });
@@ -135,20 +155,24 @@ public:
         commands_.push_back([](VkCommandBuffer cmd, Renderer& renderer) {
             vkCmdEndRendering(cmd);
 
-            VkImageMemoryBarrier barrier{};
-            barrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
-            barrier.oldLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
-            barrier.newLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
-            barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-            barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-            barrier.image = renderer.swapchain_images()[renderer.current_image_index()];
-            barrier.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-            barrier.subresourceRange.baseMipLevel = 0;
-            barrier.subresourceRange.levelCount = 1;
-            barrier.subresourceRange.baseArrayLayer = 0;
-            barrier.subresourceRange.layerCount = 1;
-            barrier.srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
-            barrier.dstAccessMask = 0;
+            VkImageMemoryBarrier barrier{
+                .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
+                .pNext = nullptr,
+                .srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
+                .dstAccessMask = 0,
+                .oldLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+                .newLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR,
+                .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+                .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+                .image = renderer.swapchain_images()[renderer.current_image_index()],
+                .subresourceRange = {
+                    .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
+                    .baseMipLevel = 0,
+                    .levelCount = 1,
+                    .baseArrayLayer = 0,
+                    .layerCount = 1
+                }
+            };
 
             vkCmdPipelineBarrier(
                 cmd,
@@ -163,22 +187,24 @@ public:
 
     void setViewport() {
         commands_.push_back([](VkCommandBuffer cmd, Renderer& renderer) {
-            VkViewport viewport{};
-            viewport.x = 0.0f;
-            viewport.y = 0.0f;
-            viewport.width = static_cast<float>(renderer.swapchain_extent().width);
-            viewport.height = static_cast<float>(renderer.swapchain_extent().height);
-            viewport.minDepth = 0.0f;
-            viewport.maxDepth = 1.0f;
+            VkViewport viewport{
+                .x = 0.0f,
+                .y = 0.0f,
+                .width = static_cast<float>(renderer.swapchain_extent().width),
+                .height = static_cast<float>(renderer.swapchain_extent().height),
+                .minDepth = 0.0f,
+                .maxDepth = 1.0f
+            };
             vkCmdSetViewport(cmd, 0, 1, &viewport);
         });
     }
 
     void setScissor() {
         commands_.push_back([](VkCommandBuffer cmd, Renderer& renderer) {
-            VkRect2D scissor{};
-            scissor.offset = {0, 0};
-            scissor.extent = renderer.swapchain_extent();
+            VkRect2D scissor{
+                .offset = {0, 0},
+                .extent = renderer.swapchain_extent()
+            };
             vkCmdSetScissor(cmd, 0, 1, &scissor);
         });
     }
@@ -245,25 +271,40 @@ public:
                 throw std::runtime_error("Pipeline has no descriptor set allocated");
             }
 
-            VkDescriptorImageInfo imageInfo{};
-            imageInfo.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-            imageInfo.imageView = texture->image_view();
-            imageInfo.sampler = texture->sampler();
+            VkDescriptorImageInfo imageInfo{
+                .sampler = texture->sampler(),
+                .imageView = texture->image_view(),
+                .imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL
+            };
 
-            VkWriteDescriptorSet descriptorWrite{};
-            descriptorWrite.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-            descriptorWrite.dstSet = descSet;
-            descriptorWrite.dstBinding = binding;
-            descriptorWrite.dstArrayElement = 0;
-            descriptorWrite.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-            descriptorWrite.descriptorCount = 1;
-            descriptorWrite.pImageInfo = &imageInfo;
+            VkWriteDescriptorSet descriptorWrite{
+                .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+                .pNext = nullptr,
+                .dstSet = descSet,
+                .dstBinding = binding,
+                .dstArrayElement = 0,
+                .descriptorCount = 1,
+                .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+                .pImageInfo = &imageInfo,
+                .pBufferInfo = nullptr,
+                .pTexelBufferView = nullptr
+            };
 
             vkUpdateDescriptorSets(renderer.device(), 1, &descriptorWrite, 0, nullptr);
 
             vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline->layout(), 0, 1, &descSet, 0, nullptr);
         });
     }
+    VkCommandBuffer get() const { 
+        return command_buffers_[renderer_.current_frame()]; 
+    }
+
+    void execute(VkCommandBuffer vkCmd) {
+        for (auto& cmd_func : commands_) {
+            cmd_func(vkCmd, renderer_);
+        }
+    }
+
 
 private:
     void bindDescriptorBuffer_(uint32_t binding, std::shared_ptr<Buffer> buffer, std::shared_ptr<Pipeline> pipeline) {
@@ -277,19 +318,24 @@ private:
             VkBuffer target_buffer = buffer->get();
 
             if (pipeline->get_bound_buffer(frame) != target_buffer) {
-                VkDescriptorBufferInfo bufferInfo{};
-                bufferInfo.buffer = target_buffer;
-                bufferInfo.offset = 0;
-                bufferInfo.range = buffer->size();
+                VkDescriptorBufferInfo bufferInfo{
+                    .buffer = target_buffer,
+                    .offset = 0,
+                    .range = buffer->size()
+                };
 
-                VkWriteDescriptorSet descriptorWrite{};
-                descriptorWrite.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-                descriptorWrite.dstSet = descSet;
-                descriptorWrite.dstBinding = binding;
-                descriptorWrite.dstArrayElement = 0;
-                descriptorWrite.descriptorType = pipeline->descriptor_type_for_binding(binding);
-                descriptorWrite.descriptorCount = 1;
-                descriptorWrite.pBufferInfo = &bufferInfo;
+                VkWriteDescriptorSet descriptorWrite{
+                    .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+                    .pNext = nullptr,
+                    .dstSet = descSet,
+                    .dstBinding = binding,
+                    .dstArrayElement = 0,
+                    .descriptorCount = 1,
+                    .descriptorType = pipeline->descriptor_type_for_binding(binding),
+                    .pImageInfo = nullptr,
+                    .pBufferInfo = &bufferInfo,
+                    .pTexelBufferView = nullptr
+                };
 
                 vkUpdateDescriptorSets(renderer.device(), 1, &descriptorWrite, 0, nullptr);
                 pipeline->set_bound_buffer(frame, target_buffer);
@@ -299,19 +345,6 @@ private:
         });
     }
 
-public:
-
-    VkCommandBuffer get() const { 
-        return command_buffers_[renderer_.current_frame()]; 
-    }
-
-    void execute(VkCommandBuffer vkCmd) {
-        for (auto& cmd_func : commands_) {
-            cmd_func(vkCmd, renderer_);
-        }
-    }
-
-private:
     CommandBuffer(Renderer& renderer) : renderer_(renderer) {}
 
     Renderer& renderer_;

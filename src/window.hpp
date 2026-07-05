@@ -29,10 +29,6 @@ struct MouseState
 
 class Window
 {
-private:
-    Window(int width, int height, const std::string& title) :
-        width_(width), height_(height), title_(title) {}
-
 public:
     static std::expected<std::unique_ptr<Window>, std::string> create(int width, int height, const std::string& title)
     {
@@ -98,17 +94,6 @@ public:
         title_ = title;
         glfwSetWindowTitle(window_.get(), title_.c_str());
     }
-
-private:
-    std::unique_ptr<GLFWwindow, WindowDeleter> window_;
-    int width_;
-    int height_;
-    std::string title_;
-
-    MouseState mouse_;
-    bool framebuffer_resized_ = false;
-
-public:
     bool was_framebuffer_resized() const { return framebuffer_resized_; }
     void reset_framebuffer_resized() { framebuffer_resized_ = false; }
 
@@ -117,7 +102,16 @@ public:
     }
 
 private:
+    Window(int width, int height, const std::string& title) :
+        width_(width), height_(height), title_(title) {}
 
+    std::unique_ptr<GLFWwindow, WindowDeleter> window_;
+    int width_;
+    int height_;
+    std::string title_;
+
+    MouseState mouse_;
+    bool framebuffer_resized_ = false;
 
     static void mouse_callback(GLFWwindow* window, double xpos, double ypos)
     {

@@ -86,10 +86,13 @@ public:
 
         std::vector<uint32_t> spirv(module.cbegin(), module.cend());
 
-        VkShaderModuleCreateInfo createInfo{};
-        createInfo.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
-        createInfo.codeSize = spirv.size() * sizeof(uint32_t);
-        createInfo.pCode = spirv.data();
+        VkShaderModuleCreateInfo createInfo{
+            .sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO,
+            .pNext = nullptr,
+            .flags = 0,
+            .codeSize = spirv.size() * sizeof(uint32_t),
+            .pCode = spirv.data()
+        };
 
         VkShaderModule vk_module;
         if (vkCreateShaderModule(device, &createInfo, nullptr, &vk_module) != VK_SUCCESS) {
