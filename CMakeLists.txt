@@ -31,6 +31,9 @@ FetchContent_Declare(
     GIT_SHALLOW TRUE
 )
 FetchContent_MakeAvailable(volk)
+if(TARGET volk)
+    set_target_properties(volk PROPERTIES POSITION_INDEPENDENT_CODE ON)
+endif()
 
 #vma
 FetchContent_Declare(
@@ -55,6 +58,9 @@ FetchContent_Declare(
     GIT_SHALLOW TRUE
 )
 FetchContent_MakeAvailable(vk-bootstrap)
+if(TARGET vk-bootstrap)
+    set_target_properties(vk-bootstrap PROPERTIES POSITION_INDEPENDENT_CODE ON)
+endif()
 
 #stb
 FetchContent_Declare(
