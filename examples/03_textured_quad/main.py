@@ -17,7 +17,7 @@ if __name__ == "__main__":
     frag_spv = engine.compileShader("quad_tex.frag", bz.ShaderStage.FRAGMENT)
 
     # Load texture
-    texture = engine.loadTexture("bricks.png")
+    texture = engine.loadTexture("../assets/wall.png")
 
     pipeline = (engine.createPipeline()
         .vertexShader(vert_spv)

@@ -121,13 +121,7 @@ class DemoApp:
         scene = trimesh.load(obj_path, process=False)
         self.loaded_textures = {}
         
-        script_dir = os.path.dirname(os.path.abspath(__file__))
-        white_png_path = os.path.join(script_dir, "white.png")
-        if not os.path.exists(white_png_path):
-            import base64
-            white_png = b'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+ip1sAAAAASUVORK5CYII='
-            with open(white_png_path, 'wb') as f:
-                f.write(base64.b64decode(white_png))
+        white_png_path = os.path.join(self.assets_dir, "white.png")
         self.default_texture = self.engine.loadTexture(white_png_path)
         
         all_vertices, all_normals, all_uvs, all_colors, all_faces = [], [], [], [], []
@@ -257,16 +251,7 @@ class DemoApp:
 
         view, proj, model = self.camera.get_matrices(1024.0 / 720.0)
         
-        # PyGLM mat4 is an object. So np.array([view, proj, model]) produces 
-        # an object array which fails to flatten to float list correctly.
-        # We manually construct the list for stability or convert it correctly.
-        data = []
-        for mat in (view, proj, model):
-            for i in range(4):
-                for j in range(4):
-                    data.append(mat[i][j])
-                    
-        self.ubuf.update(data)
+        self.ubuf.update(view.to_bytes() + proj.to_bytes() + model.to_bytes())
         self.engine.submit(self.cmd)
 
     def run(self):

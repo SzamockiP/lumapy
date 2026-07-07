@@ -2,7 +2,7 @@ venv/
 .vs/
 out/
 build/
-examples/assets/
+examples/assets/San_Miguel/
 
 CMakeSettings.json
 

@@ -32,8 +32,6 @@ def on_update():
     engine.submit(cmd)
 
 if __name__ == "__main__":
-    # Disable VSync in engine initialization if supported (assuming standard config, or if we can)
-    # The current engine.init just takes width, height, title. VSync might be hardcoded in Swapchain.
     engine.init(1024, 720, "Bazalt Demo - Empty")
 
     cmd = engine.createCommandBuffer()
