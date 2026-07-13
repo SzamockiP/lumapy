@@ -1,48 +1,41 @@
 import bazalt as bz
 import time
 
-engine = bz.Engine()
+# Create window and renderer separately
+window = bz.Window(1024, 720, "Bazalt Demo - Empty")
+renderer = bz.Renderer()
+renderer.connect(window)
 
-# Optional: Register an error callback
-@engine.onError
+@renderer.on_error
 def error(msg):
     print(msg)
 
+# Record command buffer once
+cmd = renderer.create_command_buffer()
+cmd.begin()
+cmd.begin_rendering(clear_color=[0.1, 0.1, 0.1, 1.0])
+cmd.end_rendering()
+
+# Main loop
 last_time = time.time()
 frame_count = 0
 fps_timer = 0.0
 
-# Register a per-frame callback
-@engine.onFrame
-def on_update():
-    global last_time, frame_count, fps_timer
+while window.is_open():
+    window.poll_events()
 
-    current_time = time.time()
-    dt = current_time - last_time
-    last_time = current_time
-    
-    frame_count += 1
-    fps_timer += dt
-    
-    # Update window title once per second to avoid OS overhead of setting title every frame
-    if fps_timer >= 1.0:
-        avg_fps = frame_count / fps_timer
-        engine.setTitle(f"Bazalt Demo - Empty | {1000.0/avg_fps:.2f} ms/frame | {avg_fps:.1f} FPS")
-        frame_count = 0
-        fps_timer = 0.0
+    if renderer.begin_frame():
+        current_time = time.time()
+        dt = current_time - last_time
+        last_time = current_time
 
-    # Submit our pre-recorded command buffer to the GPU each frame
-    engine.submit(cmd)
+        frame_count += 1
+        fps_timer += dt
 
-if __name__ == "__main__":
-    engine.init(1024, 720, "Bazalt Demo - Empty")
+        if fps_timer >= 1.0:
+            avg_fps = frame_count / fps_timer
+            window.set_title(f"Bazalt Demo - Empty | {1000.0/avg_fps:.2f} ms/frame | {avg_fps:.1f} FPS")
+            frame_count = 0
+            fps_timer = 0.0
 
-    cmd = engine.createCommandBuffer()
-    
-    # We only record the command buffer once!
-    cmd.begin()
-    # Start rendering pass with a dark gray clear color
-    cmd.beginRendering(clear_color=[0.1, 0.1, 0.1, 1.0])
-    cmd.endRendering()
-
-    engine.run()
+        renderer.submit(cmd)

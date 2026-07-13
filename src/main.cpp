@@ -7,6 +7,10 @@
 #include <expected>
 #include <chrono>
 
+#ifdef _WIN32
+#include <windows.h>
+#endif
+
 #include "Logger.hpp"
 #include "window.hpp"
 #include "Renderer.hpp"
@@ -19,163 +23,128 @@
 
 namespace py = pybind11;
 
-class Engine {
+// ── Helper: wraps Renderer + Logger so Python holds a single object ──
+class RendererWrapper {
 public:
-    Engine() = default;
+    RendererWrapper() = default;
 
-    ~Engine()
-    {
-        stop();
-    }
-
-    py::function on_error(py::function callback)
-    {
-        logger_.register_callback(callback);
-        return callback;
-    }
-
-    void init(int width, int height, const std::string& title)
-    {
-        renderer_.reset();
-        window_.reset();
-
-        auto res = Window::create(width, height, title)
-            .and_then([&](std::unique_ptr<Window> win) {
-                window_ = std::move(win);
-                return Renderer::create(logger_, *window_);
-            })
-            .and_then([&](std::unique_ptr<Renderer> ren) {
-                renderer_ = std::move(ren);
-                return std::expected<void, std::string>{};
-            })
-            .or_else([&](const std::string& err) -> std::expected<void, std::string> {
-                logger_.log(err);
-                throw std::runtime_error(err);
-            });
-    }
-
-    void run(py::object app_instance = py::none())
-    {
-        delta_time_ = 0.0f;
-        elapsed_time_ = 0.0f;
-        frame_count_ = 0;
-        is_running_.store(true, std::memory_order_relaxed);
-
-        try
-        {
-            py::gil_scoped_release release;
-
-            auto start_time = std::chrono::high_resolution_clock::now();
-            auto last_frame_time = start_time;
-
-            while (is_running_.load(std::memory_order_relaxed))
-            {
-                window_->poll_events();
-                if (window_->should_close())
-                {
-                    stop();
-                }
-
-                {
-                    py::gil_scoped_acquire acquire;
-                    if (PyErr_CheckSignals() != 0)
-                    {
-                        throw py::error_already_set();
-                    }
-                    
-                    auto now = std::chrono::high_resolution_clock::now();
-                    delta_time_ = std::chrono::duration<float>(now - last_frame_time).count();
-                    elapsed_time_ = std::chrono::duration<float>(now - start_time).count();
-                    last_frame_time = now;
-                    frame_count_++;
-
-                    renderer_->begin_frame();
-
-                    if (renderer_->frame_skipped()) {
-                        continue;
-                    }
-                    
-                    if (!app_instance.is_none()) {
-                        frame_function_(app_instance);
-                    } else {
-                        frame_function_();
-                    }
-                }
-            }
-        }
-        catch (...)
-        {
-            logger_.shutdown();
-            throw;
-        }
-        
+    ~RendererWrapper() {
         if (renderer_) {
             vkDeviceWaitIdle(renderer_->device());
         }
         logger_.shutdown();
     }
 
-    bool running() const
-    {
-        return is_running_.load(std::memory_order_relaxed);
+    void connect(Window& window) {
+        renderer_.reset();
+        auto sp = window.get_surface_provider();
+        auto res = Renderer::create(logger_, std::move(sp));
+        if (!res) {
+            logger_.log(res.error());
+            throw std::runtime_error(res.error());
+        }
+        renderer_ = std::move(res.value());
     }
 
-    void stop()
-    {
-        is_running_.store(false, std::memory_order_relaxed);
+    void connect_win32(uint64_t hwnd) {
+#ifdef _WIN32
+        renderer_.reset();
+        SurfaceProvider sp;
+        sp.required_instance_extensions = { "VK_KHR_surface", "VK_KHR_win32_surface" };
+        
+        sp.create_surface = [hwnd](VkInstance instance) -> VkSurfaceKHR {
+            auto pfnCreateWin32Surface = (PFN_vkCreateWin32SurfaceKHR)vkGetInstanceProcAddr(instance, "vkCreateWin32SurfaceKHR");
+            if (!pfnCreateWin32Surface) {
+                return VK_NULL_HANDLE;
+            }
+            VkWin32SurfaceCreateInfoKHR createInfo{
+                .sType = VK_STRUCTURE_TYPE_WIN32_SURFACE_CREATE_INFO_KHR,
+                .pNext = nullptr,
+                .flags = 0,
+                .hinstance = GetModuleHandle(nullptr),
+                .hwnd = (HWND)hwnd
+            };
+            VkSurfaceKHR surface = VK_NULL_HANDLE;
+            if (pfnCreateWin32Surface(instance, &createInfo, nullptr, &surface) != VK_SUCCESS) {
+                return VK_NULL_HANDLE;
+            }
+            return surface;
+        };
+        
+        sp.get_framebuffer_size = [hwnd]() -> std::pair<int, int> {
+            RECT rect;
+            if (GetClientRect((HWND)hwnd, &rect)) {
+                return { rect.right - rect.left, rect.bottom - rect.top };
+            }
+            return { 0, 0 };
+        };
+        
+        auto last_width = std::make_shared<int>(0);
+        auto last_height = std::make_shared<int>(0);
+        
+        sp.consume_resize_flag = [hwnd, last_width, last_height]() -> bool {
+            RECT rect;
+            if (GetClientRect((HWND)hwnd, &rect)) {
+                int w = rect.right - rect.left;
+                int h = rect.bottom - rect.top;
+                if (w != *last_width || h != *last_height) {
+                    *last_width = w;
+                    *last_height = h;
+                    return true;
+                }
+            }
+            return false;
+        };
+        
+        auto res = Renderer::create(logger_, std::move(sp));
+        if (!res) {
+            logger_.log(res.error());
+            throw std::runtime_error(res.error());
+        }
+        renderer_ = std::move(res.value());
+#else
+        throw std::runtime_error("connect_win32 is only supported on Windows");
+#endif
     }
 
-    void log(const std::string& msg)
-    {
+    py::function on_error(py::function callback) {
+        logger_.register_callback(callback);
+        return callback;
+    }
+
+    void log(const std::string& msg) {
         logger_.log(msg);
     }
 
-    void set_title(const std::string& title)
-    {
-        if (window_) {
-            window_->set_title(title);
+    bool begin_frame() {
+        return renderer_->begin_frame();
+    }
+
+    void submit(std::shared_ptr<CommandBuffer> cmd) {
+        VkCommandBuffer vkCmd = cmd->get();
+        vkResetCommandBuffer(vkCmd, 0);
+
+        VkCommandBufferBeginInfo beginInfo{
+            .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
+            .pNext = nullptr,
+            .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT,
+            .pInheritanceInfo = nullptr
+        };
+        
+        if (vkBeginCommandBuffer(vkCmd, &beginInfo) != VK_SUCCESS) {
+            throw std::runtime_error("Failed to begin recording command buffer!");
         }
+
+        cmd->execute(vkCmd);
+
+        if (vkEndCommandBuffer(vkCmd) != VK_SUCCESS) {
+            throw std::runtime_error("Failed to record command buffer!");
+        }
+
+        renderer_->end_frame(vkCmd);
     }
 
-    py::function on_frame(py::function fun)
-    {
-        frame_function_ = fun;
-        return fun;
-    }
-
-    MouseState get_mouse_state() const
-    {
-        return window_->get_mouse_state();
-    }
-
-    bool is_key_pressed(int key) const
-    {
-        return window_->is_key_pressed(key);
-    }
-
-    bool is_mouse_button_pressed(int button) const
-    {
-        return window_->is_mouse_button_pressed(button);
-    }
-
-    void set_cursor_mode(int mode)
-    {
-        window_->set_cursor_mode(mode);
-    }
-
-    float get_delta_time() const { return delta_time_; }
-    float get_time() const { return elapsed_time_; }
-    uint64_t get_frame_count() const { return frame_count_; }
-
-    int get_width() const {
-        if (window_) return window_->get_width();
-        return 0;
-    }
-
-    int get_height() const {
-        if (window_) return window_->get_height();
-        return 0;
-    }
+    // ── Resource creation methods ──
 
     py::object create_buffer(py::list list, BufferType type, std::optional<DataType> dataType = std::nullopt) {
         if (list.empty()) {
@@ -290,44 +259,11 @@ public:
         }
     }
 
-    void submit(std::shared_ptr<CommandBuffer> cmd) {
-        VkCommandBuffer vkCmd = cmd->get();
-        vkResetCommandBuffer(vkCmd, 0);
-
-        VkCommandBufferBeginInfo beginInfo{
-            .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
-            .pNext = nullptr,
-            .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT,
-            .pInheritanceInfo = nullptr
-        };
-        
-        if (vkBeginCommandBuffer(vkCmd, &beginInfo) != VK_SUCCESS) {
-            throw std::runtime_error("Failed to begin recording command buffer!");
-        }
-
-        cmd->execute(vkCmd);
-
-        if (vkEndCommandBuffer(vkCmd) != VK_SUCCESS) {
-            throw std::runtime_error("Failed to record command buffer!");
-        }
-
-        renderer_->end_frame(vkCmd);
-    }
-
 private:
-    std::atomic<bool> is_running_{false};
     Logger logger_;
-    std::jthread logic_thread_;
-
-    std::unique_ptr<Window> window_;
     std::unique_ptr<Renderer> renderer_;
-
-    py::function frame_function_;
-
-    float delta_time_ = 0.0f;
-    float elapsed_time_ = 0.0f;
-    uint64_t frame_count_ = 0;
 };
+
 
 PYBIND11_MODULE(_core, m) {
     m.doc() = "Bazalt native core module";
@@ -413,7 +349,7 @@ PYBIND11_MODULE(_core, m) {
             } else {
                 throw std::runtime_error("Unsupported data type for list update");
             }
-        }, py::arg("list"), py::arg("dataType") = py::none());
+        }, py::arg("list"), py::arg("data_type") = py::none());
     
     py::class_<ShaderModule, std::shared_ptr<ShaderModule>>(m, "ShaderModule");
 
@@ -424,16 +360,16 @@ PYBIND11_MODULE(_core, m) {
     py::class_<Pipeline, std::shared_ptr<Pipeline>>(m, "Pipeline");
 
     py::class_<PipelineBuilder, std::shared_ptr<PipelineBuilder>>(m, "PipelineBuilder")
-        .def("vertexShader", &PipelineBuilder::vertexShader)
-        .def("fragmentShader", &PipelineBuilder::fragmentShader)
-        .def("vertexFormat", &PipelineBuilder::vertexFormat)
-        .def("depthTest", &PipelineBuilder::depthTest)
-        .def("cullMode", &PipelineBuilder::cullMode)
+        .def("vertex_shader", &PipelineBuilder::vertexShader)
+        .def("fragment_shader", &PipelineBuilder::fragmentShader)
+        .def("vertex_format", &PipelineBuilder::vertexFormat)
+        .def("depth_test", &PipelineBuilder::depthTest)
+        .def("cull_mode", &PipelineBuilder::cullMode)
         .def("blend", &PipelineBuilder::blend)
-        .def("pushConstant", &PipelineBuilder::pushConstant)
-        .def("uniformBuffer", &PipelineBuilder::uniformBuffer,
+        .def("push_constant", &PipelineBuilder::pushConstant)
+        .def("uniform_buffer", &PipelineBuilder::uniformBuffer,
              py::arg("binding"), py::arg("stage"), py::arg("set"))
-        .def("storageBuffer", &PipelineBuilder::storageBuffer,
+        .def("storage_buffer", &PipelineBuilder::storageBuffer,
              py::arg("binding"), py::arg("stage"), py::arg("set"))
         .def("texture", &PipelineBuilder::texture,
              py::arg("binding"), py::arg("stage"), py::arg("set"))
@@ -447,13 +383,13 @@ PYBIND11_MODULE(_core, m) {
         });
 
     py::class_<DescriptorSet, std::shared_ptr<DescriptorSet>>(m, "DescriptorSet")
-        .def("setTexture", &DescriptorSet::setTexture,
+        .def("set_texture", &DescriptorSet::setTexture,
              py::arg("binding"), py::arg("texture"))
-        .def("setBuffer", &DescriptorSet::setBuffer,
+        .def("set_buffer", &DescriptorSet::setBuffer,
              py::arg("binding"), py::arg("buffer"));
 
     py::class_<DescriptorPool, std::shared_ptr<DescriptorPool>>(m, "DescriptorPool")
-        .def("allocateDescriptorSet", [](DescriptorPool& pool, std::shared_ptr<Pipeline> pipeline, uint32_t setIndex) -> py::object {
+        .def("allocate_set", [](DescriptorPool& pool, std::shared_ptr<Pipeline> pipeline, uint32_t setIndex) -> py::object {
             auto res = pool.allocateDescriptorSet(pipeline, setIndex);
             if (res) {
                 return py::cast(res.value());
@@ -461,7 +397,7 @@ PYBIND11_MODULE(_core, m) {
                 throw std::runtime_error(res.error());
             }
         }, py::arg("pipeline"), py::arg("set"))
-        .def("allocateFrameDescriptorSet", [](DescriptorPool& pool, std::shared_ptr<Pipeline> pipeline, uint32_t setIndex) -> py::object {
+        .def("allocate_frame_set", [](DescriptorPool& pool, std::shared_ptr<Pipeline> pipeline, uint32_t setIndex) -> py::object {
             auto res = pool.allocateFrameDescriptorSet(pipeline, setIndex);
             if (res) {
                 return py::cast(res.value());
@@ -472,56 +408,66 @@ PYBIND11_MODULE(_core, m) {
 
     py::class_<CommandBuffer, std::shared_ptr<CommandBuffer>>(m, "CommandBuffer")
         .def("begin", &CommandBuffer::begin)
-        .def("beginRendering", &CommandBuffer::beginRendering, py::arg("clear_color"))
-        .def("endRendering", &CommandBuffer::endRendering)
-        .def("setViewport", &CommandBuffer::setViewport)
-        .def("setScissor", &CommandBuffer::setScissor)
-        .def("bindPipeline", &CommandBuffer::bindPipeline)
-        .def("bindVertexBuffer", &CommandBuffer::bindVertexBuffer)
-        .def("bindIndexBuffer", &CommandBuffer::bindIndexBuffer)
+        .def("begin_rendering", &CommandBuffer::beginRendering, py::arg("clear_color"))
+        .def("end_rendering", &CommandBuffer::endRendering)
+        .def("set_viewport", &CommandBuffer::setViewport)
+        .def("set_scissor", &CommandBuffer::setScissor)
+        .def("bind_pipeline", &CommandBuffer::bindPipeline)
+        .def("bind_vertex_buffer", &CommandBuffer::bindVertexBuffer)
+        .def("bind_index_buffer", &CommandBuffer::bindIndexBuffer)
         .def("draw", &CommandBuffer::draw)
-        .def("drawIndexed", &CommandBuffer::drawIndexed,
-             py::arg("indexCount"), py::arg("firstIndex") = 0, py::arg("vertexOffset") = 0)
-        .def("drawIndexedInstanced", &CommandBuffer::drawIndexedInstanced,
-             py::arg("indexCount"), py::arg("instanceCount"),
-             py::arg("firstIndex") = 0, py::arg("vertexOffset") = 0)
-        .def("pushConstants", [](CommandBuffer& cmd, std::shared_ptr<Pipeline> pipeline, ShaderStage stage, uint32_t offset, std::string_view data) {
+        .def("draw_indexed", &CommandBuffer::drawIndexed,
+             py::arg("index_count"), py::arg("first_index") = 0, py::arg("vertex_offset") = 0)
+        .def("draw_indexed_instanced", &CommandBuffer::drawIndexedInstanced,
+             py::arg("index_count"), py::arg("instance_count"),
+             py::arg("first_index") = 0, py::arg("vertex_offset") = 0)
+        .def("push_constants", [](CommandBuffer& cmd, std::shared_ptr<Pipeline> pipeline, ShaderStage stage, uint32_t offset, std::string_view data) {
             cmd.pushConstants(pipeline, stage, offset, static_cast<uint32_t>(data.size()), data.data());
         })
-        .def("bindDescriptorSet", &CommandBuffer::bindDescriptorSet,
-             py::arg("descriptorSet"), py::arg("pipeline"), py::arg("set"));
+        .def("bind_descriptor_set", &CommandBuffer::bindDescriptorSet,
+             py::arg("descriptor_set"), py::arg("pipeline"), py::arg("set"));
 
-    py::class_<Engine>(m, "Engine")
+    // ── Window (GLFW) ──
+    py::class_<Window>(m, "Window")
+        .def(py::init([](int width, int height, const std::string& title) {
+            auto res = Window::create(width, height, title);
+            if (!res) {
+                throw std::runtime_error(res.error());
+            }
+            return std::move(res.value());
+        }), py::arg("width"), py::arg("height"), py::arg("title"))
+        .def("is_open", &Window::is_open)
+        .def("should_close", &Window::should_close)
+        .def("poll_events", &Window::poll_events)
+        .def("is_key_pressed", &Window::is_key_pressed)
+        .def("is_mouse_button_pressed", &Window::is_mouse_button_pressed)
+        .def("set_cursor_mode", &Window::set_cursor_mode)
+        .def("get_mouse_state", &Window::get_mouse_state)
+        .def("set_title", &Window::set_title)
+        .def_property_readonly("width", &Window::get_width)
+        .def_property_readonly("height", &Window::get_height);
+
+    // ── Renderer ──
+    py::class_<RendererWrapper>(m, "Renderer")
         .def(py::init<>())
-        .def("init", &Engine::init)
-        .def("run", &Engine::run, py::arg("app_instance") = py::none())
-        .def("running", &Engine::running)
-        .def("stop", &Engine::stop)
-        .def("onError", &Engine::on_error)
-        .def("onFrame", &Engine::on_frame)
-        .def("log", &Engine::log)
-        .def("setTitle", &Engine::set_title)
-        .def("getMouseState", &Engine::get_mouse_state)
-        .def("isKeyPressed", &Engine::is_key_pressed)
-        .def("isMouseButtonPressed", &Engine::is_mouse_button_pressed)
-        .def("setCursorMode", &Engine::set_cursor_mode)
-        .def("createBuffer", &Engine::create_buffer, py::arg("list"), py::arg("type"), py::arg("dataType") = py::none())
-        .def("createBuffer", &Engine::create_buffer_from_numpy, py::arg("array"), py::arg("type"))
-        .def("createBuffer", &Engine::create_empty_buffer, py::arg("size_in_bytes"), py::arg("type"))
-        .def("createCommandBuffer", &Engine::create_command_buffer)
-        .def("createPipeline", &Engine::create_pipeline)
-        .def("compileShader", &Engine::compile_shader)
-        .def("loadTexture", &Engine::load_texture)
-        .def("createDescriptorPool", &Engine::create_descriptor_pool,
+        .def("connect", &RendererWrapper::connect)
+        .def("connect_win32", &RendererWrapper::connect_win32)
+        .def("on_error", &RendererWrapper::on_error)
+        .def("log", &RendererWrapper::log)
+        .def("begin_frame", &RendererWrapper::begin_frame)
+        .def("submit", &RendererWrapper::submit)
+        .def("create_buffer", &RendererWrapper::create_buffer, py::arg("list"), py::arg("type"), py::arg("data_type") = py::none())
+        .def("create_buffer", &RendererWrapper::create_buffer_from_numpy, py::arg("array"), py::arg("type"))
+        .def("create_buffer", &RendererWrapper::create_empty_buffer, py::arg("size_in_bytes"), py::arg("type"))
+        .def("create_command_buffer", &RendererWrapper::create_command_buffer)
+        .def("create_pipeline", &RendererWrapper::create_pipeline)
+        .def("compile_shader", &RendererWrapper::compile_shader)
+        .def("load_texture", &RendererWrapper::load_texture)
+        .def("create_descriptor_pool", &RendererWrapper::create_descriptor_pool,
              py::arg("max_sets"), py::arg("samplers") = 0,
-             py::arg("uniform_buffers") = 0, py::arg("storage_buffers") = 0)
-        .def("submit", &Engine::submit)
-        .def("getDeltaTime", &Engine::get_delta_time)
-        .def("getTime", &Engine::get_time)
-        .def("getFrameCount", &Engine::get_frame_count)
-        .def("getWidth", &Engine::get_width)
-        .def("getHeight", &Engine::get_height);
+             py::arg("uniform_buffers") = 0, py::arg("storage_buffers") = 0);
 
+    // ── Key Constants ──
     m.attr("KEY_SPACE") = GLFW_KEY_SPACE;
     m.attr("KEY_APOSTROPHE") = GLFW_KEY_APOSTROPHE;
     m.attr("KEY_COMMA") = GLFW_KEY_COMMA;

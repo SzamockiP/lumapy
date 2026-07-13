@@ -31,14 +31,14 @@ class Camera:
         self.up = glm.normalize(glm.cross(right, self.front))
         return right
 
-    def process_keyboard(self, engine, dt, right):
+    def process_keyboard(self, window, dt, right):
         velocity = self.speed * dt
-        if engine.isKeyPressed(bz.KEY_W): self.pos += velocity * self.front
-        if engine.isKeyPressed(bz.KEY_S): self.pos -= velocity * self.front
-        if engine.isKeyPressed(bz.KEY_A): self.pos -= velocity * right
-        if engine.isKeyPressed(bz.KEY_D): self.pos += velocity * right
-        if engine.isKeyPressed(bz.KEY_SPACE): self.pos += velocity * self.up
-        if engine.isKeyPressed(bz.KEY_LEFT_SHIFT): self.pos -= velocity * self.up
+        if window.is_key_pressed(bz.KEY_W): self.pos += velocity * self.front
+        if window.is_key_pressed(bz.KEY_S): self.pos -= velocity * self.front
+        if window.is_key_pressed(bz.KEY_A): self.pos -= velocity * right
+        if window.is_key_pressed(bz.KEY_D): self.pos += velocity * right
+        if window.is_key_pressed(bz.KEY_SPACE): self.pos += velocity * self.up
+        if window.is_key_pressed(bz.KEY_LEFT_SHIFT): self.pos -= velocity * self.up
 
     def get_matrices(self, aspect_ratio):
         view = glm.lookAt(self.pos, self.pos + self.front, self.up)
@@ -71,11 +71,11 @@ def load_materials(mtl_path):
 
 class DemoApp:
     def __init__(self):
-        # 1. Initialize the engine
-        self.engine = bz.Engine()
-        # 2. Create a window (width, height, title)
-        self.engine.init(1024, 720, "Bazalt Demo - Model Loader")
-        self.engine.setCursorMode(bz.CURSOR_DISABLED)
+        # Create window and renderer
+        self.window = bz.Window(1024, 720, "Bazalt Demo - Model Loader")
+        self.renderer = bz.Renderer()
+        self.renderer.connect(self.window)
+        self.window.set_cursor_mode(bz.CURSOR_DISABLED)
         
         self.camera = Camera()
         self.last_time = time.time()
@@ -87,35 +87,33 @@ class DemoApp:
         script_dir = os.path.dirname(os.path.abspath(__file__))
         self.assets_dir = os.path.normpath(os.path.join(script_dir, "..", "assets"))
         
+        self.renderer.on_error(self.on_error)
         self.setup_pipeline(script_dir)
         self.load_scene(os.path.join(self.assets_dir, "San_Miguel", "san-miguel.obj"))
         self.setup_descriptors()
         self.record_commands()
 
-        self.engine.onError(self.on_error)
-        self.engine.onFrame(self.on_update)
-
     def on_error(self, msg):
-        print(f"[Engine Error]: {msg}")
+        print(f"[Renderer Error]: {msg}")
 
     def setup_pipeline(self, script_dir):
         # Compile GLSL shaders
-        vert_spv = self.engine.compileShader(os.path.join(script_dir, "model.vert"), bz.ShaderStage.VERTEX)
-        frag_spv = self.engine.compileShader(os.path.join(script_dir, "model.frag"), bz.ShaderStage.FRAGMENT)
+        vert_spv = self.renderer.compile_shader(os.path.join(script_dir, "model.vert"), bz.ShaderStage.VERTEX)
+        frag_spv = self.renderer.compile_shader(os.path.join(script_dir, "model.frag"), bz.ShaderStage.FRAGMENT)
 
         # Create a graphics pipeline using a builder pattern
-        self.pipeline = (self.engine.createPipeline()
-            .vertexShader(vert_spv)
-            .fragmentShader(frag_spv)
-            .vertexFormat([bz.Format.FLOAT3, bz.Format.FLOAT3, bz.Format.FLOAT2, bz.Format.FLOAT3])
-            .depthTest(True)
-            .cullMode(bz.CullMode.BACK, bz.FrontFace.COUNTER_CLOCKWISE)
-            .uniformBuffer(0, bz.ShaderStage.VERTEX, set=0)
+        self.pipeline = (self.renderer.create_pipeline()
+            .vertex_shader(vert_spv)
+            .fragment_shader(frag_spv)
+            .vertex_format([bz.Format.FLOAT3, bz.Format.FLOAT3, bz.Format.FLOAT2, bz.Format.FLOAT3])
+            .depth_test(True)
+            .cull_mode(bz.CullMode.BACK, bz.FrontFace.COUNTER_CLOCKWISE)
+            .uniform_buffer(0, bz.ShaderStage.VERTEX, set=0)
             .texture(0, bz.ShaderStage.FRAGMENT, set=1)
             .build())
 
         # 3 * mat4 = 192 bytes
-        self.ubuf = self.engine.createBuffer(192, bz.BufferType.UNIFORM)
+        self.ubuf = self.renderer.create_buffer(192, bz.BufferType.UNIFORM)
 
     def load_scene(self, obj_path):
         print("Loading model...")
@@ -126,7 +124,7 @@ class DemoApp:
         self.loaded_textures = {}
         
         white_png_path = os.path.join(self.assets_dir, "white.png")
-        self.default_texture = self.engine.loadTexture(white_png_path)
+        self.default_texture = self.renderer.load_texture(white_png_path)
         
         all_vertices, all_normals, all_uvs, all_colors, all_faces = [], [], [], [], []
         self.draw_calls = []
@@ -163,7 +161,7 @@ class DemoApp:
                         tex_file = tex_file if os.path.isabs(tex_file) else os.path.normpath(os.path.join(obj_dir, tex_file))
                         if os.path.exists(tex_file):
                             if tex_file not in self.loaded_textures:
-                                self.loaded_textures[tex_file] = self.engine.loadTexture(tex_file)
+                                self.loaded_textures[tex_file] = self.renderer.load_texture(tex_file)
                             tex = self.loaded_textures[tex_file]
             
             colors = np.tile(mat_color, (len(vertices), 1)).astype(np.float32)
@@ -192,79 +190,81 @@ class DemoApp:
         interleaved[:, 6:8] = np.concatenate(all_uvs)
         interleaved[:, 8:11] = np.concatenate(all_colors)
         
-        self.vbuf = self.engine.createBuffer(interleaved.flatten(), bz.BufferType.VERTEX)
-        self.ibuf = self.engine.createBuffer(np.concatenate(all_faces).flatten().astype(np.uint32), bz.BufferType.INDEX)
+        self.vbuf = self.renderer.create_buffer(interleaved.flatten(), bz.BufferType.VERTEX)
+        self.ibuf = self.renderer.create_buffer(np.concatenate(all_faces).flatten().astype(np.uint32), bz.BufferType.INDEX)
 
     def setup_descriptors(self):
         # Create Descriptor Pool and allocate descriptor set
-        self.pool = self.engine.createDescriptorPool(
+        self.pool = self.renderer.create_descriptor_pool(
             max_sets=3 + len(self.loaded_textures), 
             uniform_buffers=2, 
             samplers=1 + len(self.loaded_textures)
         )
-        self.frame_set = self.pool.allocateFrameDescriptorSet(self.pipeline, set=0)
-        self.frame_set.setBuffer(0, self.ubuf)
+        self.frame_set = self.pool.allocate_frame_set(self.pipeline, set=0)
+        self.frame_set.set_buffer(0, self.ubuf)
 
         self.texture_sets = {}
         for path, tex in self.loaded_textures.items():
-            tex_set = self.pool.allocateDescriptorSet(self.pipeline, set=1)
-            tex_set.setTexture(0, tex)
+            tex_set = self.pool.allocate_set(self.pipeline, set=1)
+            tex_set.set_texture(0, tex)
             self.texture_sets[tex] = tex_set
             
-        default_tex_set = self.pool.allocateDescriptorSet(self.pipeline, set=1)
-        default_tex_set.setTexture(0, self.default_texture)
+        default_tex_set = self.pool.allocate_set(self.pipeline, set=1)
+        default_tex_set.set_texture(0, self.default_texture)
         self.texture_sets[self.default_texture] = default_tex_set
 
     def record_commands(self):
         # Create and record a command buffer
-        self.cmd = self.engine.createCommandBuffer()
+        self.cmd = self.renderer.create_command_buffer()
         self.cmd.begin()
-        self.cmd.beginRendering(clear_color=[0.1, 0.2, 0.3, 1.0])
-        self.cmd.setViewport()
-        self.cmd.setScissor()
-        self.cmd.bindPipeline(self.pipeline)
-        self.cmd.bindDescriptorSet(self.frame_set, self.pipeline, set=0)
+        self.cmd.begin_rendering(clear_color=[0.1, 0.2, 0.3, 1.0])
+        self.cmd.set_viewport()
+        self.cmd.set_scissor()
+        self.cmd.bind_pipeline(self.pipeline)
+        self.cmd.bind_descriptor_set(self.frame_set, self.pipeline, set=0)
         
-        self.cmd.bindVertexBuffer(self.vbuf)
-        self.cmd.bindIndexBuffer(self.ibuf)
+        self.cmd.bind_vertex_buffer(self.vbuf)
+        self.cmd.bind_index_buffer(self.ibuf)
         
         for dc in self.draw_calls:
-            self.cmd.bindDescriptorSet(self.texture_sets[dc['texture']], self.pipeline, set=1)
-            self.cmd.drawIndexed(dc['index_count'], firstIndex=dc['first_index'], vertexOffset=dc['vertex_offset'])
+            self.cmd.bind_descriptor_set(self.texture_sets[dc['texture']], self.pipeline, set=1)
+            self.cmd.draw_indexed(dc['index_count'], first_index=dc['first_index'], vertex_offset=dc['vertex_offset'])
             
-        self.cmd.endRendering()
-
-    def on_update(self):
-        current_time = time.time()
-        dt = current_time - self.last_time
-        self.last_time = current_time
-
-        self.frame_count += 1
-        self.fps_timer += dt
-        if self.fps_timer >= 1.0:
-            avg_fps = self.frame_count / self.fps_timer
-            self.engine.setTitle(f"Bazalt Demo - Model Loader | {1000.0/avg_fps:.2f} ms/frame | {avg_fps:.1f} FPS")
-            self.frame_count = 0
-            self.fps_timer = 0.0
-
-        mouse = self.engine.getMouseState()
-        dx = mouse.dx - self.last_mouse_dx
-        dy = mouse.dy - self.last_mouse_dy
-        self.last_mouse_dx, self.last_mouse_dy = mouse.dx, mouse.dy
-
-        right_vec = self.camera.update_mouse(dx, dy)
-        self.camera.process_keyboard(self.engine, dt, right_vec)
-
-        view, proj, model = self.camera.get_matrices(1024.0 / 720.0)
-        
-        self.ubuf.update(view.to_bytes() + proj.to_bytes() + model.to_bytes())
-        
-        # Submit our pre-recorded command buffer to the GPU each frame
-        self.engine.submit(self.cmd)
+        self.cmd.end_rendering()
 
     def run(self):
         print("Rendering started")
-        self.engine.run()
+        last_mouse_dx = self.last_mouse_dx
+        last_mouse_dy = self.last_mouse_dy
+        
+        while self.window.is_open():
+            self.window.poll_events()
+            
+            if self.renderer.begin_frame():
+                current_time = time.time()
+                dt = current_time - self.last_time
+                self.last_time = current_time
+                
+                self.frame_count += 1
+                self.fps_timer += dt
+                if self.fps_timer >= 1.0:
+                    avg_fps = self.frame_count / self.fps_timer
+                    self.window.set_title(f"Bazalt Demo - Model Loader | {1000.0/avg_fps:.2f} ms/frame | {avg_fps:.1f} FPS")
+                    self.frame_count = 0
+                    self.fps_timer = 0.0
+                    
+                mouse = self.window.get_mouse_state()
+                dx = mouse.dx - last_mouse_dx
+                dy = mouse.dy - last_mouse_dy
+                last_mouse_dx, last_mouse_dy = mouse.dx, mouse.dy
+                
+                right_vec = self.camera.update_mouse(dx, dy)
+                self.camera.process_keyboard(self.window, dt, right_vec)
+                
+                view, proj, model = self.camera.get_matrices(1024.0 / 720.0)
+                self.ubuf.update(view.to_bytes() + proj.to_bytes() + model.to_bytes())
+                
+                self.renderer.submit(self.cmd)
 
 if __name__ == "__main__":
     app = DemoApp()

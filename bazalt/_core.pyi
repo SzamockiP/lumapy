@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from enum import IntEnum
-from typing import Optional, Sequence, overload
+from typing import Optional, Sequence, overload, Callable
 
 # ── Enums ──────────────────────────────────────────────────────────────
 
@@ -63,12 +63,12 @@ class Buffer:
     @overload
     def update(self, array: buffer) -> None: ...
     @overload
-    def update(self, list: list, dataType: Optional[DataType] = None) -> None: ...
+    def update(self, list: list, data_type: Optional[DataType] = None) -> None: ...
     def update(self, *args, **kwargs) -> None:
         """Update buffer contents.
 
         Accepts raw bytes, a numpy array (buffer protocol), or a Python list.
-        For lists, the data type is inferred from elements unless ``dataType``
+        For lists, the data type is inferred from elements unless ``data_type``
         is specified explicitly.
         """
         ...
@@ -97,22 +97,22 @@ class Pipeline:
 class DescriptorSet:
     """A descriptor set binding resources to a pipeline."""
     
-    def setTexture(self, binding: int, texture: Texture) -> None:
+    def set_texture(self, binding: int, texture: Texture) -> None:
         """Write a texture to this descriptor set."""
         ...
         
-    def setBuffer(self, binding: int, buffer: Buffer) -> None:
+    def set_buffer(self, binding: int, buffer: Buffer) -> None:
         """Write a buffer to this descriptor set."""
         ...
 
 class DescriptorPool:
     """A pool from which descriptor sets can be allocated."""
     
-    def allocateDescriptorSet(self, pipeline: Pipeline, set: int) -> DescriptorSet:
+    def allocate_set(self, pipeline: Pipeline, set: int) -> DescriptorSet:
         """Allocate a static descriptor set (1 internal copy) for materials/textures."""
         ...
         
-    def allocateFrameDescriptorSet(self, pipeline: Pipeline, set: int) -> DescriptorSet:
+    def allocate_frame_set(self, pipeline: Pipeline, set: int) -> DescriptorSet:
         """Allocate a per-frame descriptor set for per-frame updated buffers."""
         ...
 
@@ -122,23 +122,23 @@ class PipelineBuilder:
     All configuration methods return ``self`` for chaining.
     """
 
-    def vertexShader(self, shader: ShaderModule) -> PipelineBuilder:
+    def vertex_shader(self, shader: ShaderModule) -> PipelineBuilder:
         """Set the vertex shader stage."""
         ...
 
-    def fragmentShader(self, shader: ShaderModule) -> PipelineBuilder:
+    def fragment_shader(self, shader: ShaderModule) -> PipelineBuilder:
         """Set the fragment shader stage."""
         ...
 
-    def vertexFormat(self, formats: list[Format]) -> PipelineBuilder:
+    def vertex_format(self, formats: list[Format]) -> PipelineBuilder:
         """Define vertex input layout as a list of attribute formats."""
         ...
 
-    def depthTest(self, enable: bool) -> PipelineBuilder:
+    def depth_test(self, enable: bool) -> PipelineBuilder:
         """Enable or disable depth testing and writing."""
         ...
 
-    def cullMode(self, mode: CullMode, frontFace: FrontFace) -> PipelineBuilder:
+    def cull_mode(self, mode: CullMode, front_face: FrontFace) -> PipelineBuilder:
         """Set triangle culling mode and front-face winding order."""
         ...
 
@@ -146,7 +146,7 @@ class PipelineBuilder:
         """Enable or disable alpha blending."""
         ...
 
-    def pushConstant(self, size: int, stage: ShaderStage) -> PipelineBuilder:
+    def push_constant(self, size: int, stage: ShaderStage) -> PipelineBuilder:
         """Declare a push constant range.
 
         Args:
@@ -155,11 +155,11 @@ class PipelineBuilder:
         """
         ...
 
-    def uniformBuffer(self, binding: int, stage: ShaderStage, set: int) -> PipelineBuilder:
+    def uniform_buffer(self, binding: int, stage: ShaderStage, set: int) -> PipelineBuilder:
         """Declare a uniform buffer descriptor binding."""
         ...
 
-    def storageBuffer(self, binding: int, stage: ShaderStage, set: int) -> PipelineBuilder:
+    def storage_buffer(self, binding: int, stage: ShaderStage, set: int) -> PipelineBuilder:
         """Declare a storage buffer descriptor binding."""
         ...
 
@@ -177,14 +177,14 @@ class CommandBuffer:
     """Deferred GPU command recorder.
 
     Commands are recorded once via the ``begin…``/``end…`` methods,
-    then replayed every frame when passed to ``Engine.submit()``.
+    then replayed every frame when passed to ``Renderer.submit()``.
     """
 
     def begin(self) -> None:
         """Clear previously recorded commands and start a new recording."""
         ...
 
-    def beginRendering(self, *, clear_color: list[float]) -> None:
+    def begin_rendering(self, *, clear_color: list[float]) -> None:
         """Begin a dynamic rendering pass.
 
         Args:
@@ -192,43 +192,43 @@ class CommandBuffer:
         """
         ...
 
-    def endRendering(self) -> None:
+    def end_rendering(self) -> None:
         """End the current rendering pass and transition to present layout."""
         ...
 
-    def setViewport(self) -> None:
+    def set_viewport(self) -> None:
         """Set the viewport to cover the full swapchain extent."""
         ...
 
-    def setScissor(self) -> None:
+    def set_scissor(self) -> None:
         """Set the scissor rectangle to cover the full swapchain extent."""
         ...
 
-    def bindPipeline(self, pipeline: Pipeline) -> None:
+    def bind_pipeline(self, pipeline: Pipeline) -> None:
         """Bind a graphics pipeline for subsequent draw calls."""
         ...
 
-    def bindVertexBuffer(self, buffer: Buffer) -> None:
+    def bind_vertex_buffer(self, buffer: Buffer) -> None:
         """Bind a vertex buffer at binding 0."""
         ...
 
-    def bindIndexBuffer(self, buffer: Buffer) -> None:
+    def bind_index_buffer(self, buffer: Buffer) -> None:
         """Bind an index buffer (uint32 indices)."""
         ...
 
-    def draw(self, vertexCount: int) -> None:
+    def draw(self, vertex_count: int) -> None:
         """Record a non-indexed draw call."""
         ...
 
-    def drawIndexed(self, indexCount: int, firstIndex: int = 0, vertexOffset: int = 0) -> None:
+    def draw_indexed(self, index_count: int, first_index: int = 0, vertex_offset: int = 0) -> None:
         """Record an indexed draw call (1 instance)."""
         ...
 
-    def drawIndexedInstanced(self, indexCount: int, instanceCount: int, firstIndex: int = 0, vertexOffset: int = 0) -> None:
+    def draw_indexed_instanced(self, index_count: int, instance_count: int, first_index: int = 0, vertex_offset: int = 0) -> None:
         """Record an indexed, instanced draw call."""
         ...
 
-    def pushConstants(
+    def push_constants(
         self,
         pipeline: Pipeline,
         stage: ShaderStage,
@@ -245,83 +245,39 @@ class CommandBuffer:
         """
         ...
 
-    def bindDescriptorSet(
-        self, descriptorSet: DescriptorSet, pipeline: Pipeline, set: int
+    def bind_descriptor_set(
+        self, descriptor_set: DescriptorSet, pipeline: Pipeline, set: int
     ) -> None:
         """Bind a descriptor set to the specified set index."""
         ...
 
-# ── Engine ─────────────────────────────────────────────────────────────
+# ── Window ─────────────────────────────────────────────────────────────
 
-class Engine:
-    """Main entry point — manages window, Vulkan context, and render loop."""
+class Window:
+    """Manages the OS window and GLFW input callbacks."""
 
-    def __init__(self) -> None: ...
+    def __init__(self, width: int, height: int, title: str) -> None: ...
 
-    def init(self, width: int, height: int, title: str) -> None:
-        """Create a window and initialize the Vulkan renderer.
-
-        Args:
-            width: Initial window width in pixels.
-            height: Initial window height in pixels.
-            title: Window title string.
-        """
+    def is_open(self) -> bool:
+        """Return ``True`` if the window is open."""
         ...
 
-    def run(self, app_instance: object = None) -> None:
-        """Enter the main render loop (blocks until the window is closed).
-
-        If ``app_instance`` is provided, the frame callback receives it
-        as its first argument.
-        """
+    def should_close(self) -> bool:
+        """Return ``True`` if the window should close."""
         ...
 
-    def running(self) -> bool:
-        """Return ``True`` while the render loop is active."""
+    def poll_events(self) -> None:
+        """Poll and process OS input/window events."""
         ...
 
-    def stop(self) -> None:
-        """Signal the render loop to exit after the current frame."""
-        ...
-
-    def onError(self, callback: ...) -> ...:
-        """Register an error/log callback. Can be used as a decorator::
-
-            @engine.onError
-            def on_error(msg: str):
-                print(msg)
-        """
-        ...
-
-    def onFrame(self, callback: ...) -> ...:
-        """Register the per-frame update function. Can be used as a decorator::
-
-            @engine.onFrame
-            def on_update():
-                ...
-        """
-        ...
-
-    def log(self, msg: str) -> None:
-        """Send a message to the logger (delivered asynchronously to error callbacks)."""
-        ...
-
-    def setTitle(self, title: str) -> None:
-        """Update the window title."""
-        ...
-
-    def getMouseState(self) -> MouseState:
-        """Return the current accumulated mouse state."""
-        ...
-
-    def isKeyPressed(self, key: int) -> bool:
+    def is_key_pressed(self, key: int) -> bool:
         """Check if a keyboard key is currently held down.
 
         Use module-level ``KEY_*`` constants for key codes.
         """
         ...
 
-    def isMouseButtonPressed(self, button: int) -> bool:
+    def is_mouse_button_pressed(self, button: int) -> bool:
         """Check if a mouse button is currently held down.
 
         Use ``MOUSE_BUTTON_LEFT``, ``MOUSE_BUTTON_RIGHT``,
@@ -329,61 +285,106 @@ class Engine:
         """
         ...
 
-    def setCursorMode(self, mode: int) -> None:
+    def set_cursor_mode(self, mode: int) -> None:
         """Set cursor visibility/capture mode.
 
         Use ``CURSOR_NORMAL``, ``CURSOR_DISABLED``, or ``CURSOR_HIDDEN``.
         """
         ...
 
-    def getDeltaTime(self) -> float:
-        """Time in seconds since the last frame."""
+    def get_mouse_state(self) -> MouseState:
+        """Return the current accumulated mouse state."""
         ...
 
-    def getTime(self) -> float:
-        """Elapsed time in seconds since ``run()`` was called."""
+    def set_title(self, title: str) -> None:
+        """Update the window title."""
         ...
 
-    def getFrameCount(self) -> int:
-        """Total number of frames rendered since ``run()`` was called."""
-        ...
-
-    def getWidth(self) -> int:
+    @property
+    def width(self) -> int:
         """Current window width in pixels (updates on resize)."""
         ...
 
-    def getHeight(self) -> int:
+    @property
+    def height(self) -> int:
         """Current window height in pixels (updates on resize)."""
         ...
 
+# ── Renderer ───────────────────────────────────────────────────────────
+
+class Renderer:
+    """Manages the Vulkan context, device queues, swapchain and resources."""
+
+    def __init__(self) -> None: ...
+
+    def connect(self, window: Window) -> None:
+        """Connect the renderer to a window and initialize Vulkan swapchain/surface.
+
+        Args:
+            window: The window to render to.
+        """
+        ...
+
+    def connect_win32(self, hwnd: int) -> None:
+        """Connect the renderer to a native Win32 window (HWND) and initialize Vulkan.
+
+        Args:
+            hwnd: The HWND handle of the window.
+        """
+        ...
+
+    def begin_frame(self) -> bool:
+        """Acquire the next swapchain image.
+
+        Returns ``True`` if successful, or ``False`` if the frame should be skipped (e.g. window minimized).
+        """
+        ...
+
+    def submit(self, cmd: CommandBuffer) -> None:
+        """Submit a recorded command buffer for the current frame to the presentation queue."""
+        ...
+
+    def on_error(self, callback: Callable[[str], None]) -> Callable[[str], None]:
+        """Register an error/log callback. Can be used as a decorator::
+
+            @renderer.on_error
+            def on_error(msg: str):
+                print(msg)
+        """
+        ...
+
+    def log(self, msg: str) -> None:
+        """Send a message to the logger (delivered asynchronously to error callbacks)."""
+        ...
+
     @overload
-    def createBuffer(
-        self, list: list, type: BufferType, dataType: Optional[DataType] = None
+    def create_buffer(
+        self, list: list, type: BufferType, data_type: Optional[DataType] = None
     ) -> Buffer: ...
     @overload
-    def createBuffer(self, array: buffer, type: BufferType) -> Buffer: ...
+    def create_buffer(self, array: buffer, type: BufferType) -> Buffer: ...
     @overload
-    def createBuffer(self, size_in_bytes: int, type: BufferType) -> Buffer: ...
-    def createBuffer(self, *args, **kwargs) -> Buffer:
+    def create_buffer(self, size_in_bytes: int, type: BufferType) -> Buffer: ...
+    def create_buffer(self, *args, **kwargs) -> Buffer:
         """Create a GPU buffer.
 
         Three overloads:
 
-        1. ``createBuffer(list, type, dataType=None)`` — from a Python list
-        2. ``createBuffer(array, type)`` — from a numpy array (buffer protocol)
-        3. ``createBuffer(size_in_bytes, type)`` — empty buffer of given size
+        1. ``create_buffer(list, type, data_type=None)`` — from a Python list
+        2. ``create_buffer(array, type)`` — from a numpy array (buffer protocol)
+        3. ``create_buffer(size_in_bytes, type)`` — empty buffer of given size
         """
         ...
 
-    def createCommandBuffer(self) -> CommandBuffer:
+    def create_command_buffer(self) -> CommandBuffer:
         """Allocate a new command buffer."""
         ...
 
-    def createPipeline(self) -> PipelineBuilder:
+    def create_pipeline(self) -> PipelineBuilder:
         """Create a new pipeline builder."""
         ...
 
-    def compileShader(self, path: str, stage: ShaderStage) -> ShaderModule:
+    def compile_shader(self, path: str, stage: ShaderStage) -> ShaderModule:
         """Compile a GLSL shader file to SPIR-V at runtime.
 
         Args:
@@ -392,18 +393,14 @@ class Engine:
         """
         ...
 
-    def loadTexture(self, path: str) -> Texture:
+    def load_texture(self, path: str) -> Texture:
         """Load an image file as a GPU texture (supports PNG, JPG, BMP, etc.)."""
         ...
         
-    def createDescriptorPool(
+    def create_descriptor_pool(
         self, max_sets: int, samplers: int = 0, uniform_buffers: int = 0, storage_buffers: int = 0
     ) -> DescriptorPool:
         """Create a descriptor pool for allocating descriptor sets."""
-        ...
-
-    def submit(self, cmd: CommandBuffer) -> None:
-        """Submit a recorded command buffer for the current frame."""
         ...
 
 # ── Keyboard Constants ─────────────────────────────────────────────────

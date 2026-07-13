@@ -28,14 +28,14 @@ class Camera:
         self.up = glm.normalize(glm.cross(right, self.front))
         return right
 
-    def process_keyboard(self, engine, dt, right):
+    def process_keyboard(self, window, dt, right):
         velocity = self.speed * dt
-        if engine.isKeyPressed(bz.KEY_W): self.pos += velocity * self.front
-        if engine.isKeyPressed(bz.KEY_S): self.pos -= velocity * self.front
-        if engine.isKeyPressed(bz.KEY_A): self.pos -= velocity * right
-        if engine.isKeyPressed(bz.KEY_D): self.pos += velocity * right
-        if engine.isKeyPressed(bz.KEY_SPACE): self.pos += velocity * self.up
-        if engine.isKeyPressed(bz.KEY_LEFT_SHIFT): self.pos -= velocity * self.up
+        if window.is_key_pressed(bz.KEY_W): self.pos += velocity * self.front
+        if window.is_key_pressed(bz.KEY_S): self.pos -= velocity * self.front
+        if window.is_key_pressed(bz.KEY_A): self.pos -= velocity * right
+        if window.is_key_pressed(bz.KEY_D): self.pos += velocity * right
+        if window.is_key_pressed(bz.KEY_SPACE): self.pos += velocity * self.up
+        if window.is_key_pressed(bz.KEY_LEFT_SHIFT): self.pos -= velocity * self.up
 
     def get_matrices(self, aspect_ratio):
         view = glm.lookAt(self.pos, self.pos + self.front, self.up)
@@ -44,140 +44,128 @@ class Camera:
         model = glm.mat4(1.0)
         return view, proj, model
 
-class App:
-    def __init__(self):
-        # 1. Initialize the engine
-        self.engine = bz.Engine()
-        # 2. Create a window (width, height, title)
-        self.engine.init(1024, 720, "Bazalt Demo - 10 Cubes Lighting")
-        self.engine.setCursorMode(bz.CURSOR_DISABLED)
+# Create window and renderer
+window = bz.Window(1024, 720, "Bazalt Demo - 10 Cubes Lighting")
+renderer = bz.Renderer()
+renderer.connect(window)
+window.set_cursor_mode(bz.CURSOR_DISABLED)
 
-        self.camera = Camera(pos=(0.0, 0.0, 5.0), speed=5.0)
-        
-        self.last_mouse_dx = 0.0
-        self.last_mouse_dy = 0.0
-        self.last_time = time.time()
-        self.frame_count = 0
-        self.fps_timer = 0.0
+renderer.on_error(lambda msg: print(msg))
 
-        self.setup_pipeline()
-        self.setup_buffers()
-        self.setup_descriptors()
-        self.record_commands()
+# Compile shaders
+vert_spv = renderer.compile_shader("10cubes.vert", bz.ShaderStage.VERTEX)
+frag_spv = renderer.compile_shader("10cubes.frag", bz.ShaderStage.FRAGMENT)
 
-        self.engine.onError(self.on_error)
-        self.engine.onFrame(self.on_update)
+# Build pipeline
+pipeline = (renderer.create_pipeline()
+    .vertex_shader(vert_spv)
+    .fragment_shader(frag_spv)
+    .vertex_format([bz.Format.FLOAT3, bz.Format.FLOAT3, bz.Format.FLOAT3]) # pos, normal, color
+    .depth_test(True)
+    .uniform_buffer(0, bz.ShaderStage.VERTEX, set=0)   
+    .uniform_buffer(0, bz.ShaderStage.FRAGMENT, set=0) 
+    .build())
 
-    def on_error(self, msg):
-        print(msg)
+# Format: pos x, y, z, normal x, y, z, color r, g, b
+vertices = [
+    # Front face
+    -0.5, -0.5,  0.5,   0.0,  0.0,  1.0,   1.0, 0.0, 0.0,
+     0.5, -0.5,  0.5,   0.0,  0.0,  1.0,   1.0, 0.0, 0.0,
+     0.5,  0.5,  0.5,   0.0,  0.0,  1.0,   1.0, 0.0, 0.0,
+    -0.5,  0.5,  0.5,   0.0,  0.0,  1.0,   1.0, 0.0, 0.0,
+    # Back face
+     0.5, -0.5, -0.5,   0.0,  0.0, -1.0,   0.0, 1.0, 0.0,
+    -0.5, -0.5, -0.5,   0.0,  0.0, -1.0,   0.0, 1.0, 0.0,
+    -0.5,  0.5, -0.5,   0.0,  0.0, -1.0,   0.0, 1.0, 0.0,
+     0.5,  0.5, -0.5,   0.0,  0.0, -1.0,   0.0, 1.0, 0.0,
+    # Left face
+    -0.5, -0.5, -0.5,  -1.0,  0.0,  0.0,   0.0, 0.0, 1.0,
+    -0.5, -0.5,  0.5,  -1.0,  0.0,  0.0,   0.0, 0.0, 1.0,
+    -0.5,  0.5,  0.5,  -1.0,  0.0,  0.0,   0.0, 0.0, 1.0,
+    -0.5,  0.5, -0.5,  -1.0,  0.0,  0.0,   0.0, 0.0, 1.0,
+    # Right face
+     0.5, -0.5,  0.5,   1.0,  0.0,  0.0,   1.0, 1.0, 0.0,
+     0.5, -0.5, -0.5,   1.0,  0.0,  0.0,   1.0, 1.0, 0.0,
+     0.5,  0.5, -0.5,   1.0,  0.0,  0.0,   1.0, 1.0, 0.0,
+     0.5,  0.5,  0.5,   1.0,  0.0,  0.0,   1.0, 1.0, 0.0,
+    # Top face
+    -0.5,  0.5,  0.5,   0.0,  1.0,  0.0,   0.0, 1.0, 1.0,
+     0.5,  0.5,  0.5,   0.0,  1.0,  0.0,   0.0, 1.0, 1.0,
+     0.5,  0.5, -0.5,   0.0,  1.0,  0.0,   0.0, 1.0, 1.0,
+    -0.5,  0.5, -0.5,   0.0,  1.0,  0.0,   0.0, 1.0, 1.0,
+    # Bottom face
+    -0.5, -0.5, -0.5,   0.0, -1.0,  0.0,   1.0, 0.0, 1.0,
+     0.5, -0.5, -0.5,   0.0, -1.0,  0.0,   1.0, 0.0, 1.0,
+     0.5, -0.5,  0.5,   0.0, -1.0,  0.0,   1.0, 0.0, 1.0,
+    -0.5, -0.5,  0.5,   0.0, -1.0,  0.0,   1.0, 0.0, 1.0,
+]
+vbuf = renderer.create_buffer(vertices, bz.BufferType.VERTEX)
 
-    def setup_pipeline(self):
-        # Compile GLSL shaders
-        vert_spv = self.engine.compileShader("10cubes.vert", bz.ShaderStage.VERTEX)
-        frag_spv = self.engine.compileShader("10cubes.frag", bz.ShaderStage.FRAGMENT)
+indices = []
+for i in range(6):
+    indices.extend([i*4+0, i*4+1, i*4+2, i*4+2, i*4+3, i*4+0])
 
-        # Create a graphics pipeline using a builder pattern
-        self.pipeline = (self.engine.createPipeline()
-            .vertexShader(vert_spv)
-            .fragmentShader(frag_spv)
-            .vertexFormat([bz.Format.FLOAT3, bz.Format.FLOAT3, bz.Format.FLOAT3]) # pos, normal, color
-            .depthTest(True)
-            .uniformBuffer(0, bz.ShaderStage.VERTEX, set=0)   
-            .uniformBuffer(0, bz.ShaderStage.FRAGMENT, set=0) 
-            .build())
+ibuf = renderer.create_buffer(indices, bz.BufferType.INDEX)
 
-    def setup_buffers(self):
-        # Format: pos x, y, z, normal x, y, z, color r, g, b
-        vertices = [
-            # Front face
-            -0.5, -0.5,  0.5,   0.0,  0.0,  1.0,   1.0, 0.0, 0.0,
-             0.5, -0.5,  0.5,   0.0,  0.0,  1.0,   1.0, 0.0, 0.0,
-             0.5,  0.5,  0.5,   0.0,  0.0,  1.0,   1.0, 0.0, 0.0,
-            -0.5,  0.5,  0.5,   0.0,  0.0,  1.0,   1.0, 0.0, 0.0,
-            # Back face
-             0.5, -0.5, -0.5,   0.0,  0.0, -1.0,   0.0, 1.0, 0.0,
-            -0.5, -0.5, -0.5,   0.0,  0.0, -1.0,   0.0, 1.0, 0.0,
-            -0.5,  0.5, -0.5,   0.0,  0.0, -1.0,   0.0, 1.0, 0.0,
-             0.5,  0.5, -0.5,   0.0,  0.0, -1.0,   0.0, 1.0, 0.0,
-            # Left face
-            -0.5, -0.5, -0.5,  -1.0,  0.0,  0.0,   0.0, 0.0, 1.0,
-            -0.5, -0.5,  0.5,  -1.0,  0.0,  0.0,   0.0, 0.0, 1.0,
-            -0.5,  0.5,  0.5,  -1.0,  0.0,  0.0,   0.0, 0.0, 1.0,
-            -0.5,  0.5, -0.5,  -1.0,  0.0,  0.0,   0.0, 0.0, 1.0,
-            # Right face
-             0.5, -0.5,  0.5,   1.0,  0.0,  0.0,   1.0, 1.0, 0.0,
-             0.5, -0.5, -0.5,   1.0,  0.0,  0.0,   1.0, 1.0, 0.0,
-             0.5,  0.5, -0.5,   1.0,  0.0,  0.0,   1.0, 1.0, 0.0,
-             0.5,  0.5,  0.5,   1.0,  0.0,  0.0,   1.0, 1.0, 0.0,
-            # Top face
-            -0.5,  0.5,  0.5,   0.0,  1.0,  0.0,   0.0, 1.0, 1.0,
-             0.5,  0.5,  0.5,   0.0,  1.0,  0.0,   0.0, 1.0, 1.0,
-             0.5,  0.5, -0.5,   0.0,  1.0,  0.0,   0.0, 1.0, 1.0,
-            -0.5,  0.5, -0.5,   0.0,  1.0,  0.0,   0.0, 1.0, 1.0,
-            # Bottom face
-            -0.5, -0.5, -0.5,   0.0, -1.0,  0.0,   1.0, 0.0, 1.0,
-             0.5, -0.5, -0.5,   0.0, -1.0,  0.0,   1.0, 0.0, 1.0,
-             0.5, -0.5,  0.5,   0.0, -1.0,  0.0,   1.0, 0.0, 1.0,
-            -0.5, -0.5,  0.5,   0.0, -1.0,  0.0,   1.0, 0.0, 1.0,
-        ]
-        self.vbuf = self.engine.createBuffer(vertices, bz.BufferType.VERTEX)
+ubo_size_bytes = (
+    glm.sizeof(glm.mat4) * 2 +  
+    glm.sizeof(glm.mat4) * 11 + 
+    glm.sizeof(glm.vec4) * 3    
+)
+ubuf = renderer.create_buffer(ubo_size_bytes, bz.BufferType.UNIFORM)
 
-        indices = []
-        for i in range(6):
-            indices.extend([i*4+0, i*4+1, i*4+2, i*4+2, i*4+3, i*4+0])
-        
-        self.ibuf = self.engine.createBuffer(indices, bz.BufferType.INDEX)
+# Descriptors
+pool = renderer.create_descriptor_pool(max_sets=2, uniform_buffers=2)
+desc_set = pool.allocate_frame_set(pipeline, set=0)
+desc_set.set_buffer(0, ubuf)
 
-        ubo_size_bytes = (
-            glm.sizeof(glm.mat4) * 2 +  
-            glm.sizeof(glm.mat4) * 11 + 
-            glm.sizeof(glm.vec4) * 3    
-        )
-        self.ubuf = self.engine.createBuffer(ubo_size_bytes, bz.BufferType.UNIFORM)
+# Record commands
+cmd = renderer.create_command_buffer()
+cmd.begin()
+cmd.begin_rendering(clear_color=[0.05, 0.05, 0.05, 1.0])
+cmd.set_viewport()
+cmd.set_scissor()
+cmd.bind_pipeline(pipeline)
+cmd.bind_descriptor_set(desc_set, pipeline, set=0)
+cmd.bind_vertex_buffer(vbuf)
+cmd.bind_index_buffer(ibuf)
+cmd.draw_indexed_instanced(36, 11)
+cmd.end_rendering()
 
-    def setup_descriptors(self):
-        # Create Descriptor Pool and allocate descriptor set
-        self.pool = self.engine.createDescriptorPool(max_sets=2, uniform_buffers=2)
-        self.desc_set = self.pool.allocateFrameDescriptorSet(self.pipeline, set=0)
-        self.desc_set.setBuffer(0, self.ubuf)
+# Main loop
+camera = Camera(pos=(0.0, 0.0, 5.0), speed=5.0)
+last_mouse_dx = 0.0
+last_mouse_dy = 0.0
+last_time = time.time()
+frame_count = 0
+fps_timer = 0.0
 
-    def record_commands(self):
-        # Create and record a command buffer
-        self.cmd = self.engine.createCommandBuffer()
-        self.cmd.begin()
-        self.cmd.beginRendering(clear_color=[0.05, 0.05, 0.05, 1.0])
-        self.cmd.setViewport()
-        self.cmd.setScissor()
-        self.cmd.bindPipeline(self.pipeline)
-        self.cmd.bindDescriptorSet(self.desc_set, self.pipeline, set=0)
-        self.cmd.bindVertexBuffer(self.vbuf)
-        self.cmd.bindIndexBuffer(self.ibuf)
-        self.cmd.drawIndexedInstanced(36, 11)
-        self.cmd.endRendering()
+while window.is_open():
+    window.poll_events()
 
-    def on_update(self):
+    if renderer.begin_frame():
         current_time = time.time()
-        dt = current_time - self.last_time
-        self.last_time = current_time
+        dt = current_time - last_time
+        last_time = current_time
 
-        self.frame_count += 1
-        self.fps_timer += dt
+        frame_count += 1
+        fps_timer += dt
 
-        if self.fps_timer >= 1.0:
-            avg_fps = self.frame_count / self.fps_timer
-            self.engine.setTitle(f"Bazalt Demo - 10 Cubes Lighting | {1000.0/avg_fps:.2f} ms/frame | {avg_fps:.1f} FPS")
-            self.frame_count = 0
-            self.fps_timer = 0.0
+        if fps_timer >= 1.0:
+            avg_fps = frame_count / fps_timer
+            window.set_title(f"Bazalt Demo - 10 Cubes Lighting | {1000.0/avg_fps:.2f} ms/frame | {avg_fps:.1f} FPS")
+            frame_count = 0
+            fps_timer = 0.0
 
-        mouse = self.engine.getMouseState()
-        dx = mouse.dx - self.last_mouse_dx
-        dy = mouse.dy - self.last_mouse_dy
-        self.last_mouse_dx, self.last_mouse_dy = mouse.dx, mouse.dy
+        mouse = window.get_mouse_state()
+        dx = mouse.dx - last_mouse_dx
+        dy = mouse.dy - last_mouse_dy
+        last_mouse_dx, last_mouse_dy = mouse.dx, mouse.dy
 
-        right_vec = self.camera.update_mouse(dx, dy)
-        self.camera.process_keyboard(self.engine, dt, right_vec)
+        right_vec = camera.update_mouse(dx, dy)
+        camera.process_keyboard(window, dt, right_vec)
 
-        view, proj, _ = self.camera.get_matrices(1024.0 / 720.0)
+        view, proj, _ = camera.get_matrices(1024.0 / 720.0)
         
         data = []
         
@@ -212,17 +200,9 @@ class App:
                 data.append(light_model[c][r])
 
         data.extend([light_pos_vec.x, light_pos_vec.y, light_pos_vec.z, 0.0])
-        data.extend([self.camera.pos.x, self.camera.pos.y, self.camera.pos.z, 0.0])
+        data.extend([camera.pos.x, camera.pos.y, camera.pos.z, 0.0])
         data.extend([1.0, 0.9, 0.8, 0.0])
         
-        self.ubuf.update(data)
+        ubuf.update(data)
         
-        # Submit our pre-recorded command buffer to the GPU each frame
-        self.engine.submit(self.cmd)
-
-    def run(self):
-        self.engine.run()
-
-if __name__ == "__main__":
-    app = App()
-    app.run()
+        renderer.submit(cmd)

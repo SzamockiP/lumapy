@@ -9,22 +9,22 @@
 #include <string>
 
 #include "Logger.hpp"
-#include "window.hpp"
+#include "SurfaceProvider.hpp"
 
 class Renderer
 {
 public:
-	static std::expected<std::unique_ptr<Renderer>, std::string> create(Logger& logger, Window& window)
+	static std::expected<std::unique_ptr<Renderer>, std::string> create(Logger& logger, SurfaceProvider surface_provider)
 	{
 		if (volkInitialize() != VK_SUCCESS)
 		{
 			return std::unexpected("Vulkan: Failed to initialize volk");
 		}
 
-		auto renderer = std::unique_ptr<Renderer>(new Renderer(logger, window));
+		auto renderer = std::unique_ptr<Renderer>(new Renderer(logger, std::move(surface_provider)));
 
 		// Instance + Debug Messenger 
-		auto inst_ret = vkb::InstanceBuilder{}
+		auto inst_builder = vkb::InstanceBuilder{}
 			.set_app_name("Bazalt Engine")
 			.set_app_version(1, 0, 0)
 			.require_api_version(1, 3, 0)
@@ -37,8 +37,15 @@ public:
 			.set_debug_messenger_type(
 				VK_DEBUG_UTILS_MESSAGE_TYPE_GENERAL_BIT_EXT |
 				VK_DEBUG_UTILS_MESSAGE_TYPE_VALIDATION_BIT_EXT |
-				VK_DEBUG_UTILS_MESSAGE_TYPE_PERFORMANCE_BIT_EXT)
-			.build();
+				VK_DEBUG_UTILS_MESSAGE_TYPE_PERFORMANCE_BIT_EXT);
+
+		// Add required instance extensions from surface provider
+		for (const char* ext : renderer->surface_provider_.required_instance_extensions)
+		{
+			inst_builder.enable_extension(ext);
+		}
+
+		auto inst_ret = inst_builder.build();
 
 		if (!inst_ret)
 		{
@@ -47,10 +54,9 @@ public:
 		renderer->vkb_instance_ = inst_ret.value();
 		volkLoadInstance(renderer->vkb_instance_.instance);
 
-		// Surface 
-		VkSurfaceKHR surface = VK_NULL_HANDLE;
-		if (glfwCreateWindowSurface(renderer->vkb_instance_.instance,
-				window.get_native_handle(), nullptr, &surface) != VK_SUCCESS)
+		// Surface — created via the SurfaceProvider callback
+		VkSurfaceKHR surface = renderer->surface_provider_.create_surface(renderer->vkb_instance_.instance);
+		if (surface == VK_NULL_HANDLE)
 		{
 			return std::unexpected("Vulkan: Failed to create window surface");
 		}
@@ -320,16 +326,17 @@ public:
 	std::uint32_t current_image_index() const { return image_index_; }
 	bool frame_skipped() const { return frame_skipped_; }
 
-	void begin_frame()
+	// Returns true if a frame was successfully acquired and is ready for rendering.
+	// Returns false if the frame was skipped (minimized, resize, etc.) — caller should skip rendering.
+	bool begin_frame()
 	{
 		frame_skipped_ = false;
 
-		// Wait while minimized
-		int width = 0, height = 0;
-		window_.get_framebuffer_size(width, height);
-		while (width == 0 || height == 0) {
-			window_.get_framebuffer_size(width, height);
-			glfwWaitEvents();
+		// Check framebuffer size — return false if minimized (0x0)
+		auto [width, height] = surface_provider_.get_framebuffer_size();
+		if (width == 0 || height == 0) {
+			frame_skipped_ = true;
+			return false;
 		}
 
 		vkWaitForFences(vkb_device_.device, 1, &in_flight_fences_[current_frame_], VK_TRUE, UINT64_MAX);
@@ -346,12 +353,15 @@ public:
 		if (result == VK_ERROR_OUT_OF_DATE_KHR) {
 			recreate_swapchain();
 			frame_skipped_ = true;
-			return;
+			return false;
 		} else if (result != VK_SUCCESS && result != VK_SUBOPTIMAL_KHR) {
 			logger_.log("Failed to acquire swapchain image!");
+			frame_skipped_ = true;
+			return false;
 		}
 
 		vkResetFences(vkb_device_.device, 1, &in_flight_fences_[current_frame_]);
+		return true;
 	}
 
 	void end_frame(VkCommandBuffer cmd)
@@ -390,8 +400,7 @@ public:
 
 		VkResult result = vkQueuePresentKHR(present_queue_, &presentInfo);
 
-		if (result == VK_ERROR_OUT_OF_DATE_KHR || result == VK_SUBOPTIMAL_KHR || window_.was_framebuffer_resized()) {
-			window_.reset_framebuffer_resized();
+		if (result == VK_ERROR_OUT_OF_DATE_KHR || result == VK_SUBOPTIMAL_KHR || surface_provider_.consume_resize_flag()) {
 			recreate_swapchain();
 		}
 
@@ -399,8 +408,8 @@ public:
 	}
 
 private:
-	Renderer(Logger& logger, Window& window)
-		: logger_(logger), window_(window) {}
+	Renderer(Logger& logger, SurfaceProvider surface_provider)
+		: logger_(logger), surface_provider_(std::move(surface_provider)) {}
 
 	static VKAPI_ATTR VkBool32 VKAPI_CALL debug_callback(
 		VkDebugUtilsMessageSeverityFlagBitsEXT message_severity,
@@ -427,7 +436,7 @@ private:
 	}
 
 	Logger& logger_;
-	Window& window_;
+	SurfaceProvider surface_provider_;
 
 	vkb::Instance vkb_instance_;
 	vkb::PhysicalDevice vkb_physical_device_;

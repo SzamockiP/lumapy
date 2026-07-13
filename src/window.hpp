@@ -7,6 +7,8 @@
 #include <memory>
 #include <expected>
 
+#include "SurfaceProvider.hpp"
+
 struct WindowDeleter
 {
     void operator()(GLFWwindow* ptr) const noexcept
@@ -72,6 +74,11 @@ public:
         return glfwWindowShouldClose(window_.get());
     }
 
+    bool is_open() const
+    {
+        return !glfwWindowShouldClose(window_.get());
+    }
+
     void poll_events()
     {
         glfwPollEvents();
@@ -121,6 +128,45 @@ public:
         int w, h;
         glfwGetWindowSize(window_.get(), &w, &h);
         return h;
+    }
+
+    // Produce a SurfaceProvider that Renderer can use — decouples GLFW from Vulkan
+    SurfaceProvider get_surface_provider()
+    {
+        SurfaceProvider sp;
+
+        // GLFW knows which Vulkan instance extensions are required for the platform
+        uint32_t count = 0;
+        const char** exts = glfwGetRequiredInstanceExtensions(&count);
+        if (exts) {
+            sp.required_instance_extensions.assign(exts, exts + count);
+        }
+
+        GLFWwindow* raw = window_.get();
+
+        sp.create_surface = [raw](VkInstance instance) -> VkSurfaceKHR {
+            VkSurfaceKHR surface = VK_NULL_HANDLE;
+            if (glfwCreateWindowSurface(instance, raw, nullptr, &surface) != VK_SUCCESS) {
+                return VK_NULL_HANDLE;
+            }
+            return surface;
+        };
+
+        sp.get_framebuffer_size = [raw]() -> std::pair<int, int> {
+            int w, h;
+            glfwGetFramebufferSize(raw, &w, &h);
+            return {w, h};
+        };
+
+        // Pointer to this Window's resize flag — consumed (read + reset) each check
+        bool* resized_flag = &framebuffer_resized_;
+        sp.consume_resize_flag = [resized_flag]() -> bool {
+            bool was = *resized_flag;
+            *resized_flag = false;
+            return was;
+        };
+
+        return sp;
     }
 
 private:

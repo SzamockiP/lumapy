@@ -2,7 +2,8 @@
 
 from bazalt._core import *  # noqa: F401, F403
 from bazalt._core import (  # noqa: F401 — explicit re-exports for IDE visibility
-    Engine,
+    Renderer,
+    Window,
     Buffer,
     ShaderModule,
     Texture,
@@ -20,11 +21,12 @@ from bazalt._core import (  # noqa: F401 — explicit re-exports for IDE visibil
     FrontFace,
 )
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"
 
 __all__ = [
     # Core
-    "Engine",
+    "Renderer",
+    "Window",
     # Resources
     "Buffer",
     "ShaderModule",

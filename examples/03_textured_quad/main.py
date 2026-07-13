@@ -1,74 +1,61 @@
 import bazalt as bz
 
-engine = bz.Engine()
+# Create window and renderer
+window = bz.Window(800, 600, "Bazalt Demo - Textured Quad")
+renderer = bz.Renderer()
+renderer.connect(window)
 
-# Optional: Register an error callback
-@engine.onError
+@renderer.on_error
 def error(msg):
     print(msg)
 
-# Register a per-frame callback
-@engine.onFrame
-def on_update():
-    # Submit our pre-recorded command buffer to the GPU each frame
-    engine.submit(cmd)
+# Compile shaders
+vert_spv = renderer.compile_shader("quad_tex.vert", bz.ShaderStage.VERTEX)
+frag_spv = renderer.compile_shader("quad_tex.frag", bz.ShaderStage.FRAGMENT)
 
-if __name__ == "__main__":
-    engine.init(800, 600, "Bazalt Demo - Textured Quad")
+# Load texture
+texture = renderer.load_texture("../assets/wall.png")
 
-    vert_spv = engine.compileShader("quad_tex.vert", bz.ShaderStage.VERTEX)
-    frag_spv = engine.compileShader("quad_tex.frag", bz.ShaderStage.FRAGMENT)
+# Build pipeline: Position (FLOAT2) + UV (FLOAT2)
+pipeline = (renderer.create_pipeline()
+    .vertex_shader(vert_spv)
+    .fragment_shader(frag_spv)
+    .vertex_format([bz.Format.FLOAT2, bz.Format.FLOAT2])
+    .texture(0, bz.ShaderStage.FRAGMENT, set=0)
+    .build())
 
-    # Load a texture from file
-    texture = engine.loadTexture("../assets/wall.png")
+# Geometry with interleaved Position (x,y) and UV (u,v)
+vertices = [
+    -0.5, -0.5,  0.0, 0.0,
+     0.5, -0.5,  1.0, 0.0,
+     0.5,  0.5,  1.0, 1.0,
+    -0.5,  0.5,  0.0, 1.0,
+]
+vbuf = renderer.create_buffer(vertices, bz.BufferType.VERTEX, bz.DataType.FLOAT)
 
-    # The pipeline defines how geometry is drawn. We explicitly map our vertex layout
-    # and specify that our fragment shader expects a texture bound to slot 0.
-    pipeline = (engine.createPipeline()
-        .vertexShader(vert_spv)
-        .fragmentShader(frag_spv)
-        .vertexFormat([bz.Format.FLOAT2, bz.Format.FLOAT2]) # Position + UV
-        .texture(0, bz.ShaderStage.FRAGMENT, set=0) # Bind texture to slot 0
-        .build())
+indices = [0, 1, 2, 2, 3, 0]
+ibuf = renderer.create_buffer(indices, bz.BufferType.INDEX, bz.DataType.UINT32)
 
-    # Geometry with interleaved Position (x,y) and UV (u,v)
-    vertices = [
-        -0.5, -0.5,  0.0, 0.0,
-         0.5, -0.5,  1.0, 0.0,
-         0.5,  0.5,  1.0, 1.0,
-        -0.5,  0.5,  0.0, 1.0,
-    ]
-    # Create Vertex Buffer
-    vbuf = engine.createBuffer(vertices, bz.BufferType.VERTEX, bz.DataType.FLOAT)
+# Descriptors
+pool = renderer.create_descriptor_pool(max_sets=1, samplers=1)
+desc_set = pool.allocate_set(pipeline, set=0)
+desc_set.set_texture(0, texture)
 
-    indices = [
-        0, 1, 2, 2, 3, 0
-    ]
-    # Create Index Buffer
-    ibuf = engine.createBuffer(indices, bz.BufferType.INDEX, bz.DataType.UINT32)
+# Record commands
+cmd = renderer.create_command_buffer()
+cmd.begin()
+cmd.begin_rendering(clear_color=[0.1, 0.2, 0.3, 1.0])
+cmd.set_viewport()
+cmd.set_scissor()
+cmd.bind_pipeline(pipeline)
+cmd.bind_descriptor_set(desc_set, pipeline, set=0)
+cmd.bind_vertex_buffer(vbuf)
+cmd.bind_index_buffer(ibuf)
+cmd.draw_indexed(6)
+cmd.end_rendering()
 
-    # Descriptors map GPU resources (like textures) to shader bindings.
-    # We allocate a descriptor set and update it with our loaded texture.
-    pool = engine.createDescriptorPool(max_sets=1, samplers=1)
-    desc_set = pool.allocateDescriptorSet(pipeline, set=0)
-    
-    # Bind the texture to the descriptor set
-    desc_set.setTexture(0, texture)
-
-    cmd = engine.createCommandBuffer()
-    
-    cmd.begin()
-    cmd.beginRendering(clear_color=[0.1, 0.2, 0.3, 1.0])
-    cmd.setViewport()
-    cmd.setScissor()
-    # Bind resources
-    cmd.bindPipeline(pipeline)
-    cmd.bindDescriptorSet(desc_set, pipeline, set=0)
-    cmd.bindVertexBuffer(vbuf)
-    cmd.bindIndexBuffer(ibuf)
-    
-    # Draw 6 indices (2 triangles = 1 quad)
-    cmd.drawIndexed(6)
-    cmd.endRendering()
-
-    engine.run()
+# Main loop
+while window.is_open():
+    window.poll_events()
+    if renderer.begin_frame():
+        renderer.submit(cmd)
