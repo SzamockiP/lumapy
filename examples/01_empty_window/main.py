@@ -1,14 +1,14 @@
 import bazalt as bz
 import time
 
-# Create window and renderer separately
-window = bz.Window(1024, 720, "Bazalt Demo - Empty")
-renderer = bz.Renderer()
-renderer.connect(window)
-
-@renderer.on_error
+# Create window, logger, and renderer
+logger = bz.Logger()
+@logger.on_error
 def error(msg):
     print(msg)
+
+window = bz.Window(1024, 720, "Bazalt Demo - Empty")
+renderer = bz.Renderer(window, logger)
 
 # Record command buffer once
 cmd = renderer.create_command_buffer()

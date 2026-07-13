@@ -22,247 +22,29 @@
 #include "DescriptorSet.hpp"
 
 namespace py = pybind11;
+void Renderer::submit(std::shared_ptr<CommandBuffer> cmd) {
+    VkCommandBuffer vkCmd = cmd->get();
+    vkResetCommandBuffer(vkCmd, 0);
 
-// ── Helper: wraps Renderer + Logger so Python holds a single object ──
-class RendererWrapper {
-public:
-    RendererWrapper() = default;
-
-    ~RendererWrapper() {
-        if (renderer_) {
-            vkDeviceWaitIdle(renderer_->device());
-        }
-        logger_.shutdown();
+    VkCommandBufferBeginInfo beginInfo{
+        .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
+        .pNext = nullptr,
+        .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT,
+        .pInheritanceInfo = nullptr
+    };
+    
+    if (vkBeginCommandBuffer(vkCmd, &beginInfo) != VK_SUCCESS) {
+        throw std::runtime_error("Failed to begin recording command buffer!");
     }
 
-    void connect(Window& window) {
-        renderer_.reset();
-        auto sp = window.get_surface_provider();
-        auto res = Renderer::create(logger_, std::move(sp));
-        if (!res) {
-            logger_.log(res.error());
-            throw std::runtime_error(res.error());
-        }
-        renderer_ = std::move(res.value());
+    cmd->execute(vkCmd);
+
+    if (vkEndCommandBuffer(vkCmd) != VK_SUCCESS) {
+        throw std::runtime_error("Failed to record command buffer!");
     }
 
-    void connect_win32(uint64_t hwnd) {
-#ifdef _WIN32
-        renderer_.reset();
-        SurfaceProvider sp;
-        sp.required_instance_extensions = { "VK_KHR_surface", "VK_KHR_win32_surface" };
-        
-        sp.create_surface = [hwnd](VkInstance instance) -> VkSurfaceKHR {
-            auto pfnCreateWin32Surface = (PFN_vkCreateWin32SurfaceKHR)vkGetInstanceProcAddr(instance, "vkCreateWin32SurfaceKHR");
-            if (!pfnCreateWin32Surface) {
-                return VK_NULL_HANDLE;
-            }
-            VkWin32SurfaceCreateInfoKHR createInfo{
-                .sType = VK_STRUCTURE_TYPE_WIN32_SURFACE_CREATE_INFO_KHR,
-                .pNext = nullptr,
-                .flags = 0,
-                .hinstance = GetModuleHandle(nullptr),
-                .hwnd = (HWND)hwnd
-            };
-            VkSurfaceKHR surface = VK_NULL_HANDLE;
-            if (pfnCreateWin32Surface(instance, &createInfo, nullptr, &surface) != VK_SUCCESS) {
-                return VK_NULL_HANDLE;
-            }
-            return surface;
-        };
-        
-        sp.get_framebuffer_size = [hwnd]() -> std::pair<int, int> {
-            RECT rect;
-            if (GetClientRect((HWND)hwnd, &rect)) {
-                return { rect.right - rect.left, rect.bottom - rect.top };
-            }
-            return { 0, 0 };
-        };
-        
-        auto last_width = std::make_shared<int>(0);
-        auto last_height = std::make_shared<int>(0);
-        
-        sp.consume_resize_flag = [hwnd, last_width, last_height]() -> bool {
-            RECT rect;
-            if (GetClientRect((HWND)hwnd, &rect)) {
-                int w = rect.right - rect.left;
-                int h = rect.bottom - rect.top;
-                if (w != *last_width || h != *last_height) {
-                    *last_width = w;
-                    *last_height = h;
-                    return true;
-                }
-            }
-            return false;
-        };
-        
-        auto res = Renderer::create(logger_, std::move(sp));
-        if (!res) {
-            logger_.log(res.error());
-            throw std::runtime_error(res.error());
-        }
-        renderer_ = std::move(res.value());
-#else
-        throw std::runtime_error("connect_win32 is only supported on Windows");
-#endif
-    }
-
-    py::function on_error(py::function callback) {
-        logger_.register_callback(callback);
-        return callback;
-    }
-
-    void log(const std::string& msg) {
-        logger_.log(msg);
-    }
-
-    bool begin_frame() {
-        return renderer_->begin_frame();
-    }
-
-    void submit(std::shared_ptr<CommandBuffer> cmd) {
-        VkCommandBuffer vkCmd = cmd->get();
-        vkResetCommandBuffer(vkCmd, 0);
-
-        VkCommandBufferBeginInfo beginInfo{
-            .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
-            .pNext = nullptr,
-            .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT,
-            .pInheritanceInfo = nullptr
-        };
-        
-        if (vkBeginCommandBuffer(vkCmd, &beginInfo) != VK_SUCCESS) {
-            throw std::runtime_error("Failed to begin recording command buffer!");
-        }
-
-        cmd->execute(vkCmd);
-
-        if (vkEndCommandBuffer(vkCmd) != VK_SUCCESS) {
-            throw std::runtime_error("Failed to record command buffer!");
-        }
-
-        renderer_->end_frame(vkCmd);
-    }
-
-    // ── Resource creation methods ──
-
-    py::object create_buffer(py::list list, BufferType type, std::optional<DataType> dataType = std::nullopt) {
-        if (list.empty()) {
-            throw std::runtime_error("Cannot create buffer from empty list");
-        }
-
-        size_t count = list.size();
-        DataType actualType = DataType::FLOAT;
-
-        if (dataType.has_value()) {
-            actualType = dataType.value();
-        } else {
-            if (py::isinstance<py::float_>(list[0])) {
-                actualType = DataType::FLOAT;
-            } else if (py::isinstance<py::int_>(list[0])) {
-                actualType = (type == BufferType::INDEX) ? DataType::UINT32 : DataType::INT32;
-            } else {
-                throw std::runtime_error("Could not infer data type from list elements");
-            }
-        }
-
-        std::expected<std::shared_ptr<Buffer>, std::string> res = std::unexpected("Unknown data type");
-
-        if (actualType == DataType::FLOAT) {
-            std::vector<float> data(count);
-            for(size_t i=0; i<count; ++i) data[i] = list[i].cast<float>();
-            res = Buffer::create(*renderer_, data.data(), count * sizeof(float), type);
-        } else if (actualType == DataType::UINT32) {
-            std::vector<uint32_t> data(count);
-            for(size_t i=0; i<count; ++i) data[i] = list[i].cast<uint32_t>();
-            res = Buffer::create(*renderer_, data.data(), count * sizeof(uint32_t), type);
-        } else if (actualType == DataType::UINT16) {
-            std::vector<uint16_t> data(count);
-            for(size_t i=0; i<count; ++i) data[i] = list[i].cast<uint16_t>();
-            res = Buffer::create(*renderer_, data.data(), count * sizeof(uint16_t), type);
-        } else if (actualType == DataType::INT32) {
-            std::vector<int32_t> data(count);
-            for(size_t i=0; i<count; ++i) data[i] = list[i].cast<int32_t>();
-            res = Buffer::create(*renderer_, data.data(), count * sizeof(int32_t), type);
-        }
-
-        if (res) {
-            return py::cast(res.value());
-        } else {
-            logger_.log(res.error());
-            throw std::runtime_error(res.error());
-        }
-    }
-
-    py::object create_buffer_from_numpy(py::buffer b, BufferType type) {
-        py::buffer_info info = b.request();
-        auto res = Buffer::create(*renderer_, info.ptr, info.size * info.itemsize, type);
-        if (res) {
-            return py::cast(res.value());
-        } else {
-            logger_.log(res.error());
-            throw std::runtime_error(res.error());
-        }
-    }
-
-    py::object create_empty_buffer(size_t size_in_bytes, BufferType type) {
-        auto res = Buffer::create(*renderer_, nullptr, size_in_bytes, type);
-        if (res) {
-            return py::cast(res.value());
-        } else {
-            logger_.log(res.error());
-            throw std::runtime_error(res.error());
-        }
-    }
-
-    py::object create_command_buffer() {
-        auto res = CommandBuffer::create(*renderer_);
-        if (res) {
-            return py::cast(res.value());
-        } else {
-            logger_.log(res.error());
-            throw std::runtime_error(res.error());
-        }
-    }
-
-    std::shared_ptr<PipelineBuilder> create_pipeline() {
-        return std::make_shared<PipelineBuilder>(*renderer_);
-    }
-
-    py::object compile_shader(const std::string& path, ShaderStage stage) {
-        auto res = ShaderCompiler::compile(renderer_->device(), path, stage);
-        if (res) {
-            return py::cast(res.value());
-        } else {
-            logger_.log(res.error());
-            throw std::runtime_error(res.error());
-        }
-    }
-
-    py::object load_texture(const std::string& path) {
-        auto res = Texture::create(*renderer_, path);
-        if (res) {
-            return py::cast(res.value());
-        } else {
-            logger_.log(res.error());
-            throw std::runtime_error(res.error());
-        }
-    }
-
-    py::object create_descriptor_pool(uint32_t maxSets, uint32_t samplers, uint32_t uniformBuffers, uint32_t storageBuffers) {
-        auto res = DescriptorPool::create(renderer_->device(), maxSets, samplers, uniformBuffers, storageBuffers);
-        if (res) {
-            return py::cast(res.value());
-        } else {
-            logger_.log(res.error());
-            throw std::runtime_error(res.error());
-        }
-    }
-
-private:
-    Logger logger_;
-    std::unique_ptr<Renderer> renderer_;
-};
+    end_frame(vkCmd);
+}
 
 
 PYBIND11_MODULE(_core, m) {
@@ -447,25 +229,192 @@ PYBIND11_MODULE(_core, m) {
         .def_property_readonly("width", &Window::get_width)
         .def_property_readonly("height", &Window::get_height);
 
-    // ── Renderer ──
-    py::class_<RendererWrapper>(m, "Renderer")
+    // ── Logger ──
+    py::class_<Logger, std::shared_ptr<Logger>>(m, "Logger")
         .def(py::init<>())
-        .def("connect", &RendererWrapper::connect)
-        .def("connect_win32", &RendererWrapper::connect_win32)
-        .def("on_error", &RendererWrapper::on_error)
-        .def("log", &RendererWrapper::log)
-        .def("begin_frame", &RendererWrapper::begin_frame)
-        .def("submit", &RendererWrapper::submit)
-        .def("create_buffer", &RendererWrapper::create_buffer, py::arg("list"), py::arg("type"), py::arg("data_type") = py::none())
-        .def("create_buffer", &RendererWrapper::create_buffer_from_numpy, py::arg("array"), py::arg("type"))
-        .def("create_buffer", &RendererWrapper::create_empty_buffer, py::arg("size_in_bytes"), py::arg("type"))
-        .def("create_command_buffer", &RendererWrapper::create_command_buffer)
-        .def("create_pipeline", &RendererWrapper::create_pipeline)
-        .def("compile_shader", &RendererWrapper::compile_shader)
-        .def("load_texture", &RendererWrapper::load_texture)
-        .def("create_descriptor_pool", &RendererWrapper::create_descriptor_pool,
-             py::arg("max_sets"), py::arg("samplers") = 0,
-             py::arg("uniform_buffers") = 0, py::arg("storage_buffers") = 0);
+        .def("on_error", [](Logger& self, py::function callback) {
+            self.register_callback(callback);
+            return callback;
+        })
+        .def("log", &Logger::log);
+
+    // ── Renderer ──
+    py::class_<Renderer, std::shared_ptr<Renderer>>(m, "Renderer")
+        .def(py::init([](Window& window, std::shared_ptr<Logger> logger) {
+            auto sp = window.get_surface_provider();
+            auto res = Renderer::create(logger, std::move(sp));
+            if (!res) {
+                if (logger) logger->log(res.error());
+                throw std::runtime_error(res.error());
+            }
+            return std::shared_ptr<Renderer>(std::move(res.value()));
+        }), py::arg("window"), py::arg("logger") = py::none())
+        .def(py::init([](uint64_t hwnd, std::shared_ptr<Logger> logger) {
+#ifdef _WIN32
+            SurfaceProvider sp;
+            sp.required_instance_extensions = { "VK_KHR_surface", "VK_KHR_win32_surface" };
+            
+            sp.create_surface = [hwnd](VkInstance instance) -> VkSurfaceKHR {
+                auto pfnCreateWin32Surface = (PFN_vkCreateWin32SurfaceKHR)vkGetInstanceProcAddr(instance, "vkCreateWin32SurfaceKHR");
+                if (!pfnCreateWin32Surface) {
+                    return VK_NULL_HANDLE;
+                }
+                VkWin32SurfaceCreateInfoKHR createInfo{
+                    .sType = VK_STRUCTURE_TYPE_WIN32_SURFACE_CREATE_INFO_KHR,
+                    .pNext = nullptr,
+                    .flags = 0,
+                    .hinstance = GetModuleHandle(nullptr),
+                    .hwnd = (HWND)hwnd
+                };
+                VkSurfaceKHR surface = VK_NULL_HANDLE;
+                if (pfnCreateWin32Surface(instance, &createInfo, nullptr, &surface) != VK_SUCCESS) {
+                    return VK_NULL_HANDLE;
+                }
+                return surface;
+            };
+            
+            sp.get_framebuffer_size = [hwnd]() -> std::pair<int, int> {
+                RECT rect;
+                if (GetClientRect((HWND)hwnd, &rect)) {
+                    return { rect.right - rect.left, rect.bottom - rect.top };
+                }
+                return { 0, 0 };
+            };
+            
+            auto last_width = std::make_shared<int>(0);
+            auto last_height = std::make_shared<int>(0);
+            
+            sp.consume_resize_flag = [hwnd, last_width, last_height]() -> bool {
+                RECT rect;
+                if (GetClientRect((HWND)hwnd, &rect)) {
+                    int w = rect.right - rect.left;
+                    int h = rect.bottom - rect.top;
+                    if (w != *last_width || h != *last_height) {
+                        *last_width = w;
+                        *last_height = h;
+                        return true;
+                    }
+                }
+                return false;
+            };
+            
+            auto res = Renderer::create(logger, std::move(sp));
+            if (!res) {
+                if (logger) logger->log(res.error());
+                throw std::runtime_error(res.error());
+            }
+            return std::shared_ptr<Renderer>(std::move(res.value()));
+#else
+            throw std::runtime_error("win32_hwnd constructor is only supported on Windows");
+#endif
+        }), py::arg("win32_hwnd"), py::arg("logger") = py::none())
+        .def("begin_frame", &Renderer::begin_frame)
+        .def("submit", &Renderer::submit)
+        .def("create_buffer", [](Renderer& self, py::list list, BufferType type, std::optional<DataType> dataType) -> py::object {
+            if (list.empty()) {
+                throw std::runtime_error("Cannot create buffer from empty list");
+            }
+
+            size_t count = list.size();
+            DataType actualType = DataType::FLOAT;
+
+            if (dataType.has_value()) {
+                actualType = dataType.value();
+            } else {
+                if (py::isinstance<py::float_>(list[0])) {
+                    actualType = DataType::FLOAT;
+                } else if (py::isinstance<py::int_>(list[0])) {
+                    actualType = (type == BufferType::INDEX) ? DataType::UINT32 : DataType::INT32;
+                } else {
+                    throw std::runtime_error("Could not infer data type from list elements");
+                }
+            }
+
+            std::expected<std::shared_ptr<Buffer>, std::string> res = std::unexpected("Unknown data type");
+
+            if (actualType == DataType::FLOAT) {
+                std::vector<float> data(count);
+                for(size_t i=0; i<count; ++i) data[i] = list[i].cast<float>();
+                res = Buffer::create(self, data.data(), count * sizeof(float), type);
+            } else if (actualType == DataType::UINT32) {
+                std::vector<uint32_t> data(count);
+                for(size_t i=0; i<count; ++i) data[i] = list[i].cast<uint32_t>();
+                res = Buffer::create(self, data.data(), count * sizeof(uint32_t), type);
+            } else if (actualType == DataType::UINT16) {
+                std::vector<uint16_t> data(count);
+                for(size_t i=0; i<count; ++i) data[i] = list[i].cast<uint16_t>();
+                res = Buffer::create(self, data.data(), count * sizeof(uint16_t), type);
+            } else if (actualType == DataType::INT32) {
+                std::vector<int32_t> data(count);
+                for(size_t i=0; i<count; ++i) data[i] = list[i].cast<int32_t>();
+                res = Buffer::create(self, data.data(), count * sizeof(int32_t), type);
+            }
+
+            if (res) {
+                return py::cast(res.value());
+            } else {
+                if (auto l = self.logger()) l->log(res.error());
+                throw std::runtime_error(res.error());
+            }
+        }, py::arg("list"), py::arg("type"), py::arg("data_type") = py::none())
+        .def("create_buffer", [](Renderer& self, py::buffer b, BufferType type) -> py::object {
+            py::buffer_info info = b.request();
+            auto res = Buffer::create(self, info.ptr, info.size * info.itemsize, type);
+            if (res) {
+                return py::cast(res.value());
+            } else {
+                if (auto l = self.logger()) l->log(res.error());
+                throw std::runtime_error(res.error());
+            }
+        }, py::arg("array"), py::arg("type"))
+        .def("create_buffer", [](Renderer& self, size_t size_in_bytes, BufferType type) -> py::object {
+            auto res = Buffer::create(self, nullptr, size_in_bytes, type);
+            if (res) {
+                return py::cast(res.value());
+            } else {
+                if (auto l = self.logger()) l->log(res.error());
+                throw std::runtime_error(res.error());
+            }
+        }, py::arg("size_in_bytes"), py::arg("type"))
+        .def("create_command_buffer", [](Renderer& self) -> py::object {
+            auto res = CommandBuffer::create(self);
+            if (res) {
+                return py::cast(res.value());
+            } else {
+                if (auto l = self.logger()) l->log(res.error());
+                throw std::runtime_error(res.error());
+            }
+        })
+        .def("create_pipeline", [](Renderer& self) -> std::shared_ptr<PipelineBuilder> {
+            return std::make_shared<PipelineBuilder>(self);
+        })
+        .def("compile_shader", [](Renderer& self, const std::string& path, ShaderStage stage) -> py::object {
+            auto res = ShaderCompiler::compile(self.device(), path, stage);
+            if (res) {
+                return py::cast(res.value());
+            } else {
+                if (auto l = self.logger()) l->log(res.error());
+                throw std::runtime_error(res.error());
+            }
+        })
+        .def("load_texture", [](Renderer& self, const std::string& path) -> py::object {
+            auto res = Texture::create(self, path);
+            if (res) {
+                return py::cast(res.value());
+            } else {
+                if (auto l = self.logger()) l->log(res.error());
+                throw std::runtime_error(res.error());
+            }
+        })
+        .def("create_descriptor_pool", [](Renderer& self, uint32_t maxSets, uint32_t samplers, uint32_t uniformBuffers, uint32_t storageBuffers) -> py::object {
+            auto res = DescriptorPool::create(self.device(), maxSets, samplers, uniformBuffers, storageBuffers);
+            if (res) {
+                return py::cast(res.value());
+            } else {
+                if (auto l = self.logger()) l->log(res.error());
+                throw std::runtime_error(res.error());
+            }
+        }, py::arg("max_sets"), py::arg("samplers") = 0, py::arg("uniform_buffers") = 0, py::arg("storage_buffers") = 0);
 
     // ── Key Constants ──
     m.attr("KEY_SPACE") = GLFW_KEY_SPACE;

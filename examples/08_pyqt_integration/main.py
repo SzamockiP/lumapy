@@ -10,16 +10,14 @@ class VulkanWidget(QWidget):
         self.setWindowTitle("Bazalt PyQt6 Integration Demo")
         self.resize(800, 600)
         
-        # 1. Initialize Bazalt Renderer (without GLFW Window!)
-        self.renderer = bz.Renderer()
-        
-        # 2. Connect directly to native Win32 window handle
-        self.renderer.connect_win32(int(self.winId()))
-        
-        # Handle error callbacks
-        @self.renderer.on_error
+        # 1. Initialize Bazalt Logger and register callbacks
+        self.logger = bz.Logger()
+        @self.logger.on_error
         def on_err(msg):
             print(f"[Vulkan Error]: {msg}")
+
+        # 2. Initialize Bazalt Renderer and connect directly to native Win32 window handle
+        self.renderer = bz.Renderer(win32_hwnd=int(self.winId()), logger=self.logger)
 
         self.setup_vulkan()
         

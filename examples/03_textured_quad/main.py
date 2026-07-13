@@ -1,13 +1,13 @@
 import bazalt as bz
 
-# Create window and renderer
-window = bz.Window(800, 600, "Bazalt Demo - Textured Quad")
-renderer = bz.Renderer()
-renderer.connect(window)
-
-@renderer.on_error
+# Create window, logger, and renderer
+logger = bz.Logger()
+@logger.on_error
 def error(msg):
     print(msg)
+
+window = bz.Window(800, 600, "Bazalt Demo - Textured Quad")
+renderer = bz.Renderer(window, logger)
 
 # Compile shaders
 vert_spv = renderer.compile_shader("quad_tex.vert", bz.ShaderStage.VERTEX)

@@ -71,10 +71,11 @@ def load_materials(mtl_path):
 
 class DemoApp:
     def __init__(self):
-        # Create window and renderer
+        # Create window, logger and renderer
         self.window = bz.Window(1024, 720, "Bazalt Demo - Model Loader")
-        self.renderer = bz.Renderer()
-        self.renderer.connect(self.window)
+        self.logger = bz.Logger()
+        self.logger.on_error(self.on_error)
+        self.renderer = bz.Renderer(self.window, self.logger)
         self.window.set_cursor_mode(bz.CURSOR_DISABLED)
         
         self.camera = Camera()
@@ -87,7 +88,6 @@ class DemoApp:
         script_dir = os.path.dirname(os.path.abspath(__file__))
         self.assets_dir = os.path.normpath(os.path.join(script_dir, "..", "assets"))
         
-        self.renderer.on_error(self.on_error)
         self.setup_pipeline(script_dir)
         self.load_scene(os.path.join(self.assets_dir, "San_Miguel", "san-miguel.obj"))
         self.setup_descriptors()

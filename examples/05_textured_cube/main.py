@@ -44,13 +44,13 @@ class Camera:
         model = glm.mat4(1.0)
         return view, proj, model
 
-# Create window and renderer
-window = bz.Window(1024, 720, "Bazalt Demo - Textured Multi-Cube")
-renderer = bz.Renderer()
-renderer.connect(window)
-window.set_cursor_mode(bz.CURSOR_DISABLED)
+# Create window, logger, and renderer
+logger = bz.Logger()
+logger.on_error(lambda msg: print(msg))
 
-renderer.on_error(lambda msg: print(msg))
+window = bz.Window(1024, 720, "Bazalt Demo - Textured Multi-Cube")
+renderer = bz.Renderer(window, logger)
+window.set_cursor_mode(bz.CURSOR_DISABLED)
 
 # Compile shaders
 vert_spv = renderer.compile_shader("cube_tex.vert", bz.ShaderStage.VERTEX)

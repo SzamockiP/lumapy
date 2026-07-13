@@ -4,6 +4,7 @@ from bazalt._core import *  # noqa: F401, F403
 from bazalt._core import (  # noqa: F401 — explicit re-exports for IDE visibility
     Renderer,
     Window,
+    Logger,
     Buffer,
     ShaderModule,
     Texture,
@@ -27,6 +28,7 @@ __all__ = [
     # Core
     "Renderer",
     "Window",
+    "Logger",
     # Resources
     "Buffer",
     "ShaderModule",

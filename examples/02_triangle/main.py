@@ -1,13 +1,13 @@
 import bazalt as bz
 
-# Create window and renderer
-window = bz.Window(1024, 720, "Bazalt Demo - Triangle")
-renderer = bz.Renderer()
-renderer.connect(window)
-
-@renderer.on_error
+# Create window, logger, and renderer
+logger = bz.Logger()
+@logger.on_error
 def error(msg):
     print(f"Error: {msg}")
+
+window = bz.Window(1024, 720, "Bazalt Demo - Triangle")
+renderer = bz.Renderer(window, logger)
 
 # Load and compile shaders
 vert_spv = renderer.compile_shader("triangle.vert", bz.ShaderStage.VERTEX)

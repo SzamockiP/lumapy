@@ -11,10 +11,12 @@
 #include "Logger.hpp"
 #include "SurfaceProvider.hpp"
 
+class CommandBuffer;
+
 class Renderer
 {
 public:
-	static std::expected<std::unique_ptr<Renderer>, std::string> create(Logger& logger, SurfaceProvider surface_provider)
+	static std::expected<std::unique_ptr<Renderer>, std::string> create(std::shared_ptr<Logger> logger, SurfaceProvider surface_provider)
 	{
 		if (volkInitialize() != VK_SUCCESS)
 		{
@@ -27,17 +29,21 @@ public:
 		auto inst_builder = vkb::InstanceBuilder{}
 			.set_app_name("Bazalt Engine")
 			.set_app_version(1, 0, 0)
-			.require_api_version(1, 3, 0)
-			.request_validation_layers()
-			.set_debug_callback(debug_callback)
-			.set_debug_callback_user_data_pointer(&logger)
-			.set_debug_messenger_severity(
-				VK_DEBUG_UTILS_MESSAGE_SEVERITY_ERROR_BIT_EXT |
-				VK_DEBUG_UTILS_MESSAGE_SEVERITY_WARNING_BIT_EXT)
-			.set_debug_messenger_type(
-				VK_DEBUG_UTILS_MESSAGE_TYPE_GENERAL_BIT_EXT |
-				VK_DEBUG_UTILS_MESSAGE_TYPE_VALIDATION_BIT_EXT |
-				VK_DEBUG_UTILS_MESSAGE_TYPE_PERFORMANCE_BIT_EXT);
+			.require_api_version(1, 3, 0);
+
+		if (logger)
+		{
+			inst_builder.request_validation_layers()
+				.set_debug_callback(debug_callback)
+				.set_debug_callback_user_data_pointer(logger.get())
+				.set_debug_messenger_severity(
+					VK_DEBUG_UTILS_MESSAGE_SEVERITY_ERROR_BIT_EXT |
+					VK_DEBUG_UTILS_MESSAGE_SEVERITY_WARNING_BIT_EXT)
+				.set_debug_messenger_type(
+					VK_DEBUG_UTILS_MESSAGE_TYPE_GENERAL_BIT_EXT |
+					VK_DEBUG_UTILS_MESSAGE_TYPE_VALIDATION_BIT_EXT |
+					VK_DEBUG_UTILS_MESSAGE_TYPE_PERFORMANCE_BIT_EXT);
+		}
 
 		// Add required instance extensions from surface provider
 		for (const char* ext : renderer->surface_provider_.required_instance_extensions)
@@ -243,8 +249,11 @@ public:
 			return std::unexpected("Vulkan: Failed to create depth image view");
 		}
 
-		logger.log("Vulkan: Initialized (" +
-			std::string(renderer->vkb_physical_device_.properties.deviceName) + ")");
+		if (logger)
+		{
+			logger->log("Vulkan: Initialized (" +
+				std::string(renderer->vkb_physical_device_.properties.deviceName) + ")");
+		}
 
 		return renderer;
 	}
@@ -326,6 +335,9 @@ public:
 	std::uint32_t current_image_index() const { return image_index_; }
 	bool frame_skipped() const { return frame_skipped_; }
 
+	std::shared_ptr<Logger> logger() const { return logger_; }
+	void submit(std::shared_ptr<CommandBuffer> cmd);
+
 	// Returns true if a frame was successfully acquired and is ready for rendering.
 	// Returns false if the frame was skipped (minimized, resize, etc.) — caller should skip rendering.
 	bool begin_frame()
@@ -355,7 +367,7 @@ public:
 			frame_skipped_ = true;
 			return false;
 		} else if (result != VK_SUCCESS && result != VK_SUBOPTIMAL_KHR) {
-			logger_.log("Failed to acquire swapchain image!");
+			if (logger_) logger_->log("Failed to acquire swapchain image!");
 			frame_skipped_ = true;
 			return false;
 		}
@@ -384,7 +396,7 @@ public:
 		};
 
 		if (vkQueueSubmit(graphics_queue_, 1, &submitInfo, in_flight_fences_[current_frame_]) != VK_SUCCESS) {
-			logger_.log("Failed to submit draw command buffer!");
+			if (logger_) logger_->log("Failed to submit draw command buffer!");
 		}
 
 		VkPresentInfoKHR presentInfo{
@@ -408,7 +420,7 @@ public:
 	}
 
 private:
-	Renderer(Logger& logger, SurfaceProvider surface_provider)
+	Renderer(std::shared_ptr<Logger> logger, SurfaceProvider surface_provider)
 		: logger_(logger), surface_provider_(std::move(surface_provider)) {}
 
 	static VKAPI_ATTR VkBool32 VKAPI_CALL debug_callback(
@@ -435,7 +447,7 @@ private:
 		return VK_FALSE;
 	}
 
-	Logger& logger_;
+	std::shared_ptr<Logger> logger_;
 	SurfaceProvider surface_provider_;
 
 	vkb::Instance vkb_instance_;
@@ -504,7 +516,7 @@ private:
 			.build();
 
 		if (!sc_ret) {
-			logger_.log("Failed to recreate swapchain: " + sc_ret.error().message());
+			if (logger_) logger_->log("Failed to recreate swapchain: " + sc_ret.error().message());
 			return;
 		}
 
@@ -522,7 +534,7 @@ private:
 		render_finished_semaphores_.resize(swapchain_images_.size());
 		for (size_t i = 0; i < swapchain_images_.size(); i++) {
 			if (vkCreateSemaphore(vkb_device_.device, &semaphoreInfo, nullptr, &render_finished_semaphores_[i]) != VK_SUCCESS) {
-				logger_.log("Failed to recreate render finished semaphores");
+				if (logger_) logger_->log("Failed to recreate render finished semaphores");
 				return;
 			}
 		}
@@ -550,7 +562,7 @@ private:
 		allocImageInfo.usage = VMA_MEMORY_USAGE_AUTO;
 
 		if (vmaCreateImage(allocator_, &imageInfo, &allocImageInfo, &depth_image_, &depth_image_allocation_, nullptr) != VK_SUCCESS) {
-			logger_.log("Failed to recreate depth image");
+			if (logger_) logger_->log("Failed to recreate depth image");
 			return;
 		}
 
@@ -575,10 +587,10 @@ private:
 		};
 
 		if (vkCreateImageView(vkb_device_.device, &viewInfo, nullptr, &depth_image_view_) != VK_SUCCESS) {
-			logger_.log("Failed to recreate depth image view");
+			if (logger_) logger_->log("Failed to recreate depth image view");
 			return;
 		}
 
-		logger_.log("Swapchain recreated (" + std::to_string(vkb_swapchain_.extent.width) + "x" + std::to_string(vkb_swapchain_.extent.height) + ")");
+		if (logger_) logger_->log("Swapchain recreated (" + std::to_string(vkb_swapchain_.extent.width) + "x" + std::to_string(vkb_swapchain_.extent.height) + ")");
 	}
 };
