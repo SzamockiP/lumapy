@@ -86,14 +86,15 @@ public:
 		renderer->vkb_physical_device_ = phys_ret.value();
 
 		// Logical Device + Queues
-		VkPhysicalDeviceDynamicRenderingFeaturesKHR dynamic_rendering_feature{
-			.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DYNAMIC_RENDERING_FEATURES_KHR,
+		VkPhysicalDeviceVulkan13Features features13{
+			.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES,
 			.pNext = nullptr,
+			.shaderDemoteToHelperInvocation = VK_TRUE,
 			.dynamicRendering = VK_TRUE
 		};
 
 		auto dev_ret = vkb::DeviceBuilder{ renderer->vkb_physical_device_ }
-			.add_pNext(&dynamic_rendering_feature)
+			.add_pNext(&features13)
 			.build();
 
 		if (!dev_ret)
