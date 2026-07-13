@@ -249,7 +249,7 @@ PYBIND11_MODULE(_core, m) {
             }
             return std::shared_ptr<Renderer>(std::move(res.value()));
         }), py::arg("window"), py::arg("logger") = py::none())
-        .def(py::init([](uint64_t hwnd, std::shared_ptr<Logger> logger) {
+        .def(py::init([](uint64_t hwnd, std::shared_ptr<Logger> logger) -> std::shared_ptr<Renderer> {
 #ifdef _WIN32
             SurfaceProvider sp;
             sp.required_instance_extensions = { "VK_KHR_surface", "VK_KHR_win32_surface" };
