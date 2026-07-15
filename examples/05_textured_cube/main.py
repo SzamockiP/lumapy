@@ -49,22 +49,23 @@ logger = bz.Logger()
 logger.on_error(lambda msg: print(msg))
 
 window = bz.Window(1024, 720, "Bazalt Demo - Textured Multi-Cube")
-renderer = bz.Renderer(window, logger)
+ctx = bz.Context(logger)
+renderer = bz.SwapchainRenderer(window, ctx)
 window.set_cursor_mode(bz.CURSOR_DISABLED)
 
 # Compile shaders
-vert_spv = renderer.compile_shader("cube_tex.vert", bz.ShaderStage.VERTEX)
-frag_spv = renderer.compile_shader("cube_tex.frag", bz.ShaderStage.FRAGMENT)
+vert_spv = ctx.compile_shader("cube_tex.vert", bz.ShaderStage.VERTEX)
+frag_spv = ctx.compile_shader("cube_tex.frag", bz.ShaderStage.FRAGMENT)
 
 # Build pipeline
-pipeline = (renderer.create_pipeline()
+pipeline = (ctx.pipeline_builder()
     .vertex_shader(vert_spv)
     .fragment_shader(frag_spv)
     .vertex_format([bz.Format.FLOAT3, bz.Format.FLOAT2])
     .depth_test(True)
     .uniform_buffer(0, bz.ShaderStage.VERTEX, set=0)
     .texture(0, bz.ShaderStage.FRAGMENT, set=1)
-    .build())
+    .build(renderer))
 
 # Vertex data: pos (x,y,z), uv (u,v)
 vertices = [
@@ -99,7 +100,7 @@ vertices = [
      0.5,  0.5,  0.5,   1.0, 1.0,
     -0.5,  0.5,  0.5,   0.0, 1.0,
 ]
-vbuf = renderer.create_buffer(vertices, bz.BufferType.VERTEX, bz.DataType.FLOAT)
+vbuf = ctx.create_buffer(vertices, bz.BufferType.VERTEX, bz.DataType.FLOAT)
 
 indices = [
     # --- BRICKS ---
@@ -111,15 +112,15 @@ indices = [
     13, 12, 15, 15, 14, 13, # Right
     23, 22, 21, 21, 20, 23  # Bottom
 ]
-ibuf = renderer.create_buffer(indices, bz.BufferType.INDEX, bz.DataType.UINT32)
+ibuf = ctx.create_buffer(indices, bz.BufferType.INDEX, bz.DataType.UINT32)
 
-ubuf = renderer.create_buffer([0.0]*16, bz.BufferType.UNIFORM, bz.DataType.FLOAT)
+ubuf = ctx.create_buffer([0.0]*16, bz.BufferType.UNIFORM, bz.DataType.FLOAT)
 
 # Load textures and create descriptors
-tex1 = renderer.load_texture("../assets/wall.png")
-tex2 = renderer.load_texture("../assets/container.png")
+tex1 = ctx.load_texture("../assets/wall.png")
+tex2 = ctx.load_texture("../assets/container.png")
 
-pool = renderer.create_descriptor_pool(max_sets=4, samplers=2, uniform_buffers=2)
+pool = ctx.create_descriptor_pool(max_sets=4, samplers=2, uniform_buffers=2)
 
 frame_set = pool.allocate_frame_set(pipeline, set=0)
 frame_set.set_buffer(0, ubuf)

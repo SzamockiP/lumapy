@@ -7,24 +7,26 @@
 #include <cstring>
 
 #include "stb_image.h"
-#include "Renderer.hpp"
+#include "Context.hpp"
 
 class Texture {
 public:
-    Texture(VkDevice device, VmaAllocator allocator, VkImage image, VmaAllocation allocation,
+    Texture(std::shared_ptr<Context> context, VkImage image, VmaAllocation allocation,
             VkImageView imageView, VkSampler sampler, int width, int height)
-        : device_(device), allocator_(allocator), image_(image), allocation_(allocation),
+        : context_(context), image_(image), allocation_(allocation),
           image_view_(imageView), sampler_(sampler), width_(width), height_(height) {}
 
     ~Texture() {
-        if (sampler_ != VK_NULL_HANDLE) {
-            vkDestroySampler(device_, sampler_, nullptr);
-        }
-        if (image_view_ != VK_NULL_HANDLE) {
-            vkDestroyImageView(device_, image_view_, nullptr);
-        }
-        if (image_ != VK_NULL_HANDLE && allocation_ != VK_NULL_HANDLE) {
-            vmaDestroyImage(allocator_, image_, allocation_);
+        if (context_) {
+            if (sampler_ != VK_NULL_HANDLE) {
+                vkDestroySampler(context_->device(), sampler_, nullptr);
+            }
+            if (image_view_ != VK_NULL_HANDLE) {
+                vkDestroyImageView(context_->device(), image_view_, nullptr);
+            }
+            if (image_ != VK_NULL_HANDLE && allocation_ != VK_NULL_HANDLE) {
+                vmaDestroyImage(context_->allocator(), image_, allocation_);
+            }
         }
     }
 
@@ -36,7 +38,7 @@ public:
     int width() const { return width_; }
     int height() const { return height_; }
 
-    static std::expected<std::shared_ptr<Texture>, std::string> create(Renderer& renderer, const std::string& path) {
+    static std::expected<std::shared_ptr<Texture>, std::string> create(Context& context, const std::string& path) {
         // Load image from disk
         int width, height, channels;
         stbi_uc* pixels = stbi_load(path.c_str(), &width, &height, &channels, STBI_rgb_alpha);
@@ -65,15 +67,15 @@ public:
         VkBuffer stagingBuffer;
         VmaAllocation stagingAllocation;
 
-        if (vmaCreateBuffer(renderer.allocator(), &stagingInfo, &stagingAllocInfo, &stagingBuffer, &stagingAllocation, nullptr) != VK_SUCCESS) {
+        if (vmaCreateBuffer(context.allocator(), &stagingInfo, &stagingAllocInfo, &stagingBuffer, &stagingAllocation, nullptr) != VK_SUCCESS) {
             stbi_image_free(pixels);
             return std::unexpected("Failed to create staging buffer for texture");
         }
 
         void* mappedData;
-        vmaMapMemory(renderer.allocator(), stagingAllocation, &mappedData);
+        vmaMapMemory(context.allocator(), stagingAllocation, &mappedData);
         std::memcpy(mappedData, pixels, static_cast<size_t>(imageSize));
-        vmaUnmapMemory(renderer.allocator(), stagingAllocation);
+        vmaUnmapMemory(context.allocator(), stagingAllocation);
 
         stbi_image_free(pixels);
 
@@ -101,8 +103,8 @@ public:
 
         VkImage image;
         VmaAllocation allocation;
-        if (vmaCreateImage(renderer.allocator(), &imageCreateInfo, &imageAllocInfo, &image, &allocation, nullptr) != VK_SUCCESS) {
-            vmaDestroyBuffer(renderer.allocator(), stagingBuffer, stagingAllocation);
+        if (vmaCreateImage(context.allocator(), &imageCreateInfo, &imageAllocInfo, &image, &allocation, nullptr) != VK_SUCCESS) {
+            vmaDestroyBuffer(context.allocator(), stagingBuffer, stagingAllocation);
             return std::unexpected("Failed to create texture image");
         }
 
@@ -110,13 +112,13 @@ public:
         VkCommandBufferAllocateInfo cmdAllocInfo{
             .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
             .pNext = nullptr,
-            .commandPool = renderer.command_pool(),
+            .commandPool = context.command_pool(),
             .level = VK_COMMAND_BUFFER_LEVEL_PRIMARY,
             .commandBufferCount = 1
         };
 
         VkCommandBuffer cmd;
-        vkAllocateCommandBuffers(renderer.device(), &cmdAllocInfo, &cmd);
+        vkAllocateCommandBuffers(context.device(), &cmdAllocInfo, &cmd);
 
         VkCommandBufferBeginInfo beginInfo{
             .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
@@ -169,11 +171,11 @@ public:
             .pSignalSemaphores = nullptr
         };
 
-        vkQueueSubmit(renderer.graphics_queue(), 1, &submitInfo, VK_NULL_HANDLE);
-        vkQueueWaitIdle(renderer.graphics_queue());
+        vkQueueSubmit(context.graphics_queue(), 1, &submitInfo, VK_NULL_HANDLE);
+        vkQueueWaitIdle(context.graphics_queue());
 
-        vkFreeCommandBuffers(renderer.device(), renderer.command_pool(), 1, &cmd);
-        vmaDestroyBuffer(renderer.allocator(), stagingBuffer, stagingAllocation);
+        vkFreeCommandBuffers(context.device(), context.command_pool(), 1, &cmd);
+        vmaDestroyBuffer(context.allocator(), stagingBuffer, stagingAllocation);
 
         // Create ImageView
         VkImageViewCreateInfo viewInfo{
@@ -197,8 +199,8 @@ public:
         };
 
         VkImageView imageView;
-        if (vkCreateImageView(renderer.device(), &viewInfo, nullptr, &imageView) != VK_SUCCESS) {
-            vmaDestroyImage(renderer.allocator(), image, allocation);
+        if (vkCreateImageView(context.device(), &viewInfo, nullptr, &imageView) != VK_SUCCESS) {
+            vmaDestroyImage(context.allocator(), image, allocation);
             return std::unexpected("Failed to create texture image view");
         }
 
@@ -225,13 +227,13 @@ public:
         };
 
         VkSampler sampler;
-        if (vkCreateSampler(renderer.device(), &samplerInfo, nullptr, &sampler) != VK_SUCCESS) {
-            vkDestroyImageView(renderer.device(), imageView, nullptr);
-            vmaDestroyImage(renderer.allocator(), image, allocation);
+        if (vkCreateSampler(context.device(), &samplerInfo, nullptr, &sampler) != VK_SUCCESS) {
+            vkDestroyImageView(context.device(), imageView, nullptr);
+            vmaDestroyImage(context.allocator(), image, allocation);
             return std::unexpected("Failed to create texture sampler");
         }
 
-        return std::make_shared<Texture>(renderer.device(), renderer.allocator(), image, allocation, imageView, sampler, width, height);
+        return std::make_shared<Texture>(context.shared_from_this(), image, allocation, imageView, sampler, width, height);
     }
 
 private:
@@ -263,8 +265,7 @@ private:
             0, nullptr, 0, nullptr, 1, &barrier);
     }
 
-    VkDevice device_;
-    VmaAllocator allocator_;
+    std::shared_ptr<Context> context_;
     VkImage image_ = VK_NULL_HANDLE;
     VmaAllocation allocation_ = VK_NULL_HANDLE;
     VkImageView image_view_ = VK_NULL_HANDLE;

@@ -7,7 +7,7 @@
 #include <expected>
 #include <cstring>
 #include <array>
-#include "Renderer.hpp"
+#include "Context.hpp"
 
 enum class BufferType {
     VERTEX,
@@ -36,17 +36,17 @@ public:
         throw std::runtime_error("Update not supported for this buffer type");
     }
 
-    static std::expected<std::shared_ptr<Buffer>, std::string> create(Renderer& renderer, const void* data, size_t data_size, BufferType type);
+    static std::expected<std::shared_ptr<Buffer>, std::string> create(Context& context, const void* data, size_t data_size, BufferType type);
 };
 
 class StaticBuffer : public Buffer {
 public:
-    StaticBuffer(VmaAllocator allocator, VkBuffer buffer, VmaAllocation allocation, size_t size)
-        : allocator_(allocator), buffer_(buffer), allocation_(allocation), size_(size) {}
+    StaticBuffer(std::shared_ptr<Context> context, VkBuffer buffer, VmaAllocation allocation, size_t size)
+        : context_(context), buffer_(buffer), allocation_(allocation), size_(size) {}
 
     ~StaticBuffer() override {
-        if (buffer_ != VK_NULL_HANDLE) {
-            vmaDestroyBuffer(allocator_, buffer_, allocation_);
+        if (buffer_ != VK_NULL_HANDLE && context_) {
+            vmaDestroyBuffer(context_->allocator(), buffer_, allocation_);
         }
     }
 
@@ -56,7 +56,7 @@ public:
     VkBuffer get() const override { return buffer_; }
     size_t size() const override { return size_; }
 
-    static std::expected<std::shared_ptr<StaticBuffer>, std::string> create(Renderer& renderer, const void* data, size_t data_size, BufferType type) {
+    static std::expected<std::shared_ptr<StaticBuffer>, std::string> create(Context& context, const void* data, size_t data_size, BufferType type) {
         VkBufferUsageFlags usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT;
         switch (type) {
             case BufferType::VERTEX: usage |= VK_BUFFER_USAGE_VERTEX_BUFFER_BIT; break;
@@ -84,15 +84,15 @@ public:
         VmaAllocation stagingAllocation;
         VmaAllocationInfo stagingAllocInfoOut;
 
-        if (vmaCreateBuffer(renderer.allocator(), &stagingInfo, &stagingAllocInfo, &stagingBuffer, &stagingAllocation, &stagingAllocInfoOut) != VK_SUCCESS) {
+        if (vmaCreateBuffer(context.allocator(), &stagingInfo, &stagingAllocInfo, &stagingBuffer, &stagingAllocation, &stagingAllocInfoOut) != VK_SUCCESS) {
             return std::unexpected("Failed to create staging buffer");
         }
 
         if (data != nullptr && data_size > 0) {
             void* mappedData;
-            vmaMapMemory(renderer.allocator(), stagingAllocation, &mappedData);
+            vmaMapMemory(context.allocator(), stagingAllocation, &mappedData);
             std::memcpy(mappedData, data, data_size);
-            vmaUnmapMemory(renderer.allocator(), stagingAllocation);
+            vmaUnmapMemory(context.allocator(), stagingAllocation);
         }
 
         VkBufferCreateInfo bufferInfo{
@@ -111,21 +111,21 @@ public:
 
         VkBuffer buffer;
         VmaAllocation allocation;
-        if (vmaCreateBuffer(renderer.allocator(), &bufferInfo, &allocInfo, &buffer, &allocation, nullptr) != VK_SUCCESS) {
-            vmaDestroyBuffer(renderer.allocator(), stagingBuffer, stagingAllocation);
+        if (vmaCreateBuffer(context.allocator(), &bufferInfo, &allocInfo, &buffer, &allocation, nullptr) != VK_SUCCESS) {
+            vmaDestroyBuffer(context.allocator(), stagingBuffer, stagingAllocation);
             return std::unexpected("Failed to create device local buffer");
         }
 
         VkCommandBufferAllocateInfo allocCmdInfo{
             .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
             .pNext = nullptr,
-            .commandPool = renderer.command_pool(),
+            .commandPool = context.command_pool(),
             .level = VK_COMMAND_BUFFER_LEVEL_PRIMARY,
             .commandBufferCount = 1
         };
 
         VkCommandBuffer commandBuffer;
-        vkAllocateCommandBuffers(renderer.device(), &allocCmdInfo, &commandBuffer);
+        vkAllocateCommandBuffers(context.device(), &allocCmdInfo, &commandBuffer);
 
         VkCommandBufferBeginInfo beginInfo{
             .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
@@ -157,17 +157,17 @@ public:
             .pSignalSemaphores = nullptr
         };
 
-        vkQueueSubmit(renderer.graphics_queue(), 1, &submitInfo, VK_NULL_HANDLE);
-        vkQueueWaitIdle(renderer.graphics_queue());
+        vkQueueSubmit(context.graphics_queue(), 1, &submitInfo, VK_NULL_HANDLE);
+        vkQueueWaitIdle(context.graphics_queue());
 
-        vkFreeCommandBuffers(renderer.device(), renderer.command_pool(), 1, &commandBuffer);
-        vmaDestroyBuffer(renderer.allocator(), stagingBuffer, stagingAllocation);
+        vkFreeCommandBuffers(context.device(), context.command_pool(), 1, &commandBuffer);
+        vmaDestroyBuffer(context.allocator(), stagingBuffer, stagingAllocation);
 
-        return std::make_shared<StaticBuffer>(renderer.allocator(), buffer, allocation, data_size);
+        return std::make_shared<StaticBuffer>(context.shared_from_this(), buffer, allocation, data_size);
     }
 
 private:
-    VmaAllocator allocator_ = VK_NULL_HANDLE;
+    std::shared_ptr<Context> context_;
     VkBuffer buffer_ = VK_NULL_HANDLE;
     VmaAllocation allocation_ = VK_NULL_HANDLE;
     size_t size_ = 0;
@@ -175,17 +175,19 @@ private:
 
 class DynamicBuffer : public Buffer {
 public:
-    DynamicBuffer(Renderer& renderer, 
-                  std::array<VkBuffer, Renderer::MAX_FRAMES_IN_FLIGHT> buffers, 
-                  std::array<VmaAllocation, Renderer::MAX_FRAMES_IN_FLIGHT> allocations, 
+    DynamicBuffer(std::shared_ptr<Context> context, 
+                  std::array<VkBuffer, Context::MAX_FRAMES_IN_FLIGHT> buffers, 
+                  std::array<VmaAllocation, Context::MAX_FRAMES_IN_FLIGHT> allocations, 
                   size_t size,
                   BufferType type)
-        : renderer_(renderer), buffers_(buffers), allocations_(allocations), size_(size), type_(type) {}
+        : context_(context), buffers_(buffers), allocations_(allocations), size_(size), type_(type) {}
 
     ~DynamicBuffer() override {
-        for (size_t i = 0; i < Renderer::MAX_FRAMES_IN_FLIGHT; ++i) {
-            if (buffers_[i] != VK_NULL_HANDLE) {
-                vmaDestroyBuffer(renderer_.allocator(), buffers_[i], allocations_[i]);
+        if (context_) {
+            for (size_t i = 0; i < Context::MAX_FRAMES_IN_FLIGHT; ++i) {
+                if (buffers_[i] != VK_NULL_HANDLE) {
+                    vmaDestroyBuffer(context_->allocator(), buffers_[i], allocations_[i]);
+                }
             }
         }
     }
@@ -194,7 +196,7 @@ public:
     DynamicBuffer& operator=(const DynamicBuffer&) = delete;
 
     VkBuffer get() const override { 
-        return buffers_[renderer_.current_frame()]; 
+        return buffers_[context_->current_frame()]; 
     }
     
     size_t size() const override { return size_; }
@@ -206,17 +208,17 @@ public:
         if (size > size_) {
             throw std::runtime_error("Update size exceeds buffer size");
         }
-        uint32_t frame = renderer_.current_frame();
+        uint32_t frame = context_->current_frame();
         void* mappedData;
-        if (vmaMapMemory(renderer_.allocator(), allocations_[frame], &mappedData) == VK_SUCCESS) {
+        if (vmaMapMemory(context_->allocator(), allocations_[frame], &mappedData) == VK_SUCCESS) {
             std::memcpy(mappedData, data, size);
-            vmaUnmapMemory(renderer_.allocator(), allocations_[frame]);
+            vmaUnmapMemory(context_->allocator(), allocations_[frame]);
         } else {
             throw std::runtime_error("Failed to map memory for buffer update");
         }
     }
 
-    static std::expected<std::shared_ptr<DynamicBuffer>, std::string> create(Renderer& renderer, const void* data, size_t data_size, BufferType type) {
+    static std::expected<std::shared_ptr<DynamicBuffer>, std::string> create(Context& context, const void* data, size_t data_size, BufferType type) {
         VkBufferUsageFlags usage = (type == BufferType::STORAGE) 
             ? VK_BUFFER_USAGE_STORAGE_BUFFER_BIT 
             : VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT;
@@ -236,28 +238,28 @@ public:
             .pQueueFamilyIndices = nullptr
         };
 
-        std::array<VkBuffer, Renderer::MAX_FRAMES_IN_FLIGHT> buffers{};
-        std::array<VmaAllocation, Renderer::MAX_FRAMES_IN_FLIGHT> allocations{};
+        std::array<VkBuffer, Context::MAX_FRAMES_IN_FLIGHT> buffers{};
+        std::array<VmaAllocation, Context::MAX_FRAMES_IN_FLIGHT> allocations{};
 
-        for (size_t i = 0; i < Renderer::MAX_FRAMES_IN_FLIGHT; ++i) {
-            if (vmaCreateBuffer(renderer.allocator(), &bufferInfo, &allocInfo, &buffers[i], &allocations[i], nullptr) != VK_SUCCESS) {
+        for (size_t i = 0; i < Context::MAX_FRAMES_IN_FLIGHT; ++i) {
+            if (vmaCreateBuffer(context.allocator(), &bufferInfo, &allocInfo, &buffers[i], &allocations[i], nullptr) != VK_SUCCESS) {
                 return std::unexpected(std::string("Failed to create ") + (type == BufferType::STORAGE ? "storage" : "uniform") + " buffer");
             }
 
             if (data != nullptr && data_size > 0) {
                 void* mappedData;
-                vmaMapMemory(renderer.allocator(), allocations[i], &mappedData);
+                vmaMapMemory(context.allocator(), allocations[i], &mappedData);
                 std::memcpy(mappedData, data, data_size);
-                vmaUnmapMemory(renderer.allocator(), allocations[i]);
+                vmaUnmapMemory(context.allocator(), allocations[i]);
             }
         }
-        return std::make_shared<DynamicBuffer>(renderer, buffers, allocations, data_size, type);
+        return std::make_shared<DynamicBuffer>(context.shared_from_this(), buffers, allocations, data_size, type);
     }
 
 private:
-    Renderer& renderer_;
-    std::array<VkBuffer, Renderer::MAX_FRAMES_IN_FLIGHT> buffers_ = {VK_NULL_HANDLE};
-    std::array<VmaAllocation, Renderer::MAX_FRAMES_IN_FLIGHT> allocations_ = {VK_NULL_HANDLE};
+    std::shared_ptr<Context> context_;
+    std::array<VkBuffer, Context::MAX_FRAMES_IN_FLIGHT> buffers_ = {VK_NULL_HANDLE};
+    std::array<VmaAllocation, Context::MAX_FRAMES_IN_FLIGHT> allocations_ = {VK_NULL_HANDLE};
     size_t size_ = 0;
     BufferType type_ = BufferType::UNIFORM;
 };
@@ -265,10 +267,10 @@ private:
 // Keep backward-compatible alias
 using UniformBuffer = DynamicBuffer;
 
-inline std::expected<std::shared_ptr<Buffer>, std::string> Buffer::create(Renderer& renderer, const void* data, size_t data_size, BufferType type) {
+inline std::expected<std::shared_ptr<Buffer>, std::string> Buffer::create(Context& context, const void* data, size_t data_size, BufferType type) {
     if (type == BufferType::UNIFORM || type == BufferType::STORAGE) {
-        return DynamicBuffer::create(renderer, data, data_size, type);
+        return DynamicBuffer::create(context, data, data_size, type);
     } else {
-        return StaticBuffer::create(renderer, data, data_size, type);
+        return StaticBuffer::create(context, data, data_size, type);
     }
 }

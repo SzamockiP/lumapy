@@ -8,7 +8,8 @@ def error(msg):
     print(msg)
 
 window = bz.Window(1024, 720, "Bazalt Demo - Empty")
-renderer = bz.Renderer(window, logger)
+ctx = bz.Context(logger)
+renderer = bz.SwapchainRenderer(window, ctx)
 
 # Record command buffer once
 cmd = renderer.create_command_buffer()

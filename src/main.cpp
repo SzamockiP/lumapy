@@ -13,6 +13,7 @@
 
 #include "Logger.hpp"
 #include "window.hpp"
+#include "Context.hpp"
 #include "Renderer.hpp"
 #include "Buffer.hpp"
 #include "ShaderCompiler.hpp"
@@ -22,7 +23,7 @@
 #include "DescriptorSet.hpp"
 
 namespace py = pybind11;
-void Renderer::submit(std::shared_ptr<CommandBuffer> cmd) {
+void SwapchainRenderer::submit(std::shared_ptr<CommandBuffer> cmd) {
     VkCommandBuffer vkCmd = cmd->get();
     vkResetCommandBuffer(vkCmd, 0);
 
@@ -37,7 +38,7 @@ void Renderer::submit(std::shared_ptr<CommandBuffer> cmd) {
         throw std::runtime_error("Failed to begin recording command buffer!");
     }
 
-    cmd->execute(vkCmd);
+    cmd->execute(vkCmd, *this);
 
     if (vkEndCommandBuffer(vkCmd) != VK_SUCCESS) {
         throw std::runtime_error("Failed to record command buffer!");
@@ -155,14 +156,14 @@ PYBIND11_MODULE(_core, m) {
              py::arg("binding"), py::arg("stage"), py::arg("set"))
         .def("texture", &PipelineBuilder::texture,
              py::arg("binding"), py::arg("stage"), py::arg("set"))
-        .def("build", [](PipelineBuilder& builder) -> py::object {
-            auto res = builder.build();
+        .def("build", [](PipelineBuilder& builder, SwapchainRenderer& renderer) -> py::object {
+            auto res = builder.build(renderer.swapchain_format(), renderer.depth_format());
             if (res) {
                 return py::cast(res.value());
             } else {
                 throw std::runtime_error(res.error());
             }
-        });
+        }, py::arg("renderer"));
 
     py::class_<DescriptorSet, std::shared_ptr<DescriptorSet>>(m, "DescriptorSet")
         .def("set_texture", &DescriptorSet::setTexture,
@@ -238,18 +239,123 @@ PYBIND11_MODULE(_core, m) {
         })
         .def("log", &Logger::log);
 
-    // ── Renderer ──
-    py::class_<Renderer, std::shared_ptr<Renderer>>(m, "Renderer")
-        .def(py::init([](Window& window, std::shared_ptr<Logger> logger) {
-            auto sp = window.get_surface_provider();
-            auto res = Renderer::create(logger, std::move(sp));
+    // ── Context ──
+    py::class_<Context, std::shared_ptr<Context>>(m, "Context")
+        .def(py::init([](std::shared_ptr<Logger> logger) {
+            auto res = Context::create(logger);
             if (!res) {
-                if (logger) logger->log(res.error());
                 throw std::runtime_error(res.error());
             }
-            return std::shared_ptr<Renderer>(std::move(res.value()));
-        }), py::arg("window"), py::arg("logger") = py::none())
-        .def(py::init([](uint64_t hwnd, std::shared_ptr<Logger> logger) -> std::shared_ptr<Renderer> {
+            return std::move(res.value());
+        }), py::arg("logger") = py::none())
+        .def("create_buffer", [](Context& self, py::list list, BufferType type, std::optional<DataType> dataType) -> py::object {
+            if (list.empty()) {
+                throw std::runtime_error("Cannot create buffer from empty list");
+            }
+
+            size_t count = list.size();
+            DataType actualType = DataType::FLOAT;
+
+            if (dataType.has_value()) {
+                actualType = dataType.value();
+            } else {
+                if (py::isinstance<py::float_>(list[0])) {
+                    actualType = DataType::FLOAT;
+                } else if (py::isinstance<py::int_>(list[0])) {
+                    actualType = (type == BufferType::INDEX) ? DataType::UINT32 : DataType::INT32;
+                } else {
+                    throw std::runtime_error("Could not infer data type from list elements");
+                }
+            }
+
+            std::expected<std::shared_ptr<Buffer>, std::string> res = std::unexpected("Unknown data type");
+
+            if (actualType == DataType::FLOAT) {
+                std::vector<float> data(count);
+                for(size_t i=0; i<count; ++i) data[i] = list[i].cast<float>();
+                res = Buffer::create(self, data.data(), count * sizeof(float), type);
+            } else if (actualType == DataType::UINT32) {
+                std::vector<uint32_t> data(count);
+                for(size_t i=0; i<count; ++i) data[i] = list[i].cast<uint32_t>();
+                res = Buffer::create(self, data.data(), count * sizeof(uint32_t), type);
+            } else if (actualType == DataType::UINT16) {
+                std::vector<uint16_t> data(count);
+                for(size_t i=0; i<count; ++i) data[i] = list[i].cast<uint16_t>();
+                res = Buffer::create(self, data.data(), count * sizeof(uint16_t), type);
+            } else if (actualType == DataType::INT32) {
+                std::vector<int32_t> data(count);
+                for(size_t i=0; i<count; ++i) data[i] = list[i].cast<int32_t>();
+                res = Buffer::create(self, data.data(), count * sizeof(int32_t), type);
+            }
+
+            if (res) {
+                return py::cast(res.value());
+            } else {
+                if (auto l = self.logger()) l->log(res.error());
+                throw std::runtime_error(res.error());
+            }
+        }, py::arg("list"), py::arg("type"), py::arg("data_type") = py::none())
+        .def("create_buffer", [](Context& self, py::buffer b, BufferType type) -> py::object {
+            py::buffer_info info = b.request();
+            auto res = Buffer::create(self, info.ptr, info.size * info.itemsize, type);
+            if (res) {
+                return py::cast(res.value());
+            } else {
+                if (auto l = self.logger()) l->log(res.error());
+                throw std::runtime_error(res.error());
+            }
+        }, py::arg("array"), py::arg("type"))
+        .def("create_buffer", [](Context& self, size_t size_in_bytes, BufferType type) -> py::object {
+            auto res = Buffer::create(self, nullptr, size_in_bytes, type);
+            if (res) {
+                return py::cast(res.value());
+            } else {
+                if (auto l = self.logger()) l->log(res.error());
+                throw std::runtime_error(res.error());
+            }
+        }, py::arg("size_in_bytes"), py::arg("type"))
+        .def("pipeline_builder", [](Context& self) -> std::shared_ptr<PipelineBuilder> {
+            return std::make_shared<PipelineBuilder>(self);
+        })
+        .def("compile_shader", [](Context& self, const std::string& path, ShaderStage stage) -> py::object {
+            auto res = ShaderCompiler::compile(self, path, stage);
+            if (res) {
+                return py::cast(res.value());
+            } else {
+                if (auto l = self.logger()) l->log(res.error());
+                throw std::runtime_error(res.error());
+            }
+        })
+        .def("load_texture", [](Context& self, const std::string& path) -> py::object {
+            auto res = Texture::create(self, path);
+            if (res) {
+                return py::cast(res.value());
+            } else {
+                if (auto l = self.logger()) l->log(res.error());
+                throw std::runtime_error(res.error());
+            }
+        })
+        .def("create_descriptor_pool", [](Context& self, uint32_t maxSets, uint32_t samplers, uint32_t uniformBuffers, uint32_t storageBuffers) -> py::object {
+            auto res = DescriptorPool::create(self, maxSets, samplers, uniformBuffers, storageBuffers);
+            if (res) {
+                return py::cast(res.value());
+            } else {
+                if (auto l = self.logger()) l->log(res.error());
+                throw std::runtime_error(res.error());
+            }
+        }, py::arg("max_sets"), py::arg("samplers") = 0, py::arg("uniform_buffers") = 0, py::arg("storage_buffers") = 0);
+
+    // ── SwapchainRenderer ──
+    py::class_<SwapchainRenderer, std::shared_ptr<SwapchainRenderer>>(m, "SwapchainRenderer")
+        .def(py::init([](Window& window, std::shared_ptr<Context> context) {
+            auto sp = window.get_surface_provider();
+            auto res = SwapchainRenderer::create(context, std::move(sp));
+            if (!res) {
+                throw std::runtime_error(res.error());
+            }
+            return std::shared_ptr<SwapchainRenderer>(std::move(res.value()));
+        }), py::arg("window"), py::arg("context"))
+        .def(py::init([](uint64_t hwnd, std::shared_ptr<Context> context) -> std::shared_ptr<SwapchainRenderer> {
 #ifdef _WIN32
             SurfaceProvider sp;
             sp.required_instance_extensions = { "VK_KHR_surface", "VK_KHR_win32_surface" };
@@ -298,123 +404,26 @@ PYBIND11_MODULE(_core, m) {
                 return false;
             };
             
-            auto res = Renderer::create(logger, std::move(sp));
+            auto res = SwapchainRenderer::create(context, std::move(sp));
             if (!res) {
-                if (logger) logger->log(res.error());
                 throw std::runtime_error(res.error());
             }
-            return std::shared_ptr<Renderer>(std::move(res.value()));
+            return std::shared_ptr<SwapchainRenderer>(std::move(res.value()));
 #else
             throw std::runtime_error("win32_hwnd constructor is only supported on Windows");
 #endif
-        }), py::arg("win32_hwnd"), py::arg("logger") = py::none())
-        .def("begin_frame", &Renderer::begin_frame)
-        .def("submit", &Renderer::submit)
-        .def("create_buffer", [](Renderer& self, py::list list, BufferType type, std::optional<DataType> dataType) -> py::object {
-            if (list.empty()) {
-                throw std::runtime_error("Cannot create buffer from empty list");
-            }
-
-            size_t count = list.size();
-            DataType actualType = DataType::FLOAT;
-
-            if (dataType.has_value()) {
-                actualType = dataType.value();
-            } else {
-                if (py::isinstance<py::float_>(list[0])) {
-                    actualType = DataType::FLOAT;
-                } else if (py::isinstance<py::int_>(list[0])) {
-                    actualType = (type == BufferType::INDEX) ? DataType::UINT32 : DataType::INT32;
-                } else {
-                    throw std::runtime_error("Could not infer data type from list elements");
-                }
-            }
-
-            std::expected<std::shared_ptr<Buffer>, std::string> res = std::unexpected("Unknown data type");
-
-            if (actualType == DataType::FLOAT) {
-                std::vector<float> data(count);
-                for(size_t i=0; i<count; ++i) data[i] = list[i].cast<float>();
-                res = Buffer::create(self, data.data(), count * sizeof(float), type);
-            } else if (actualType == DataType::UINT32) {
-                std::vector<uint32_t> data(count);
-                for(size_t i=0; i<count; ++i) data[i] = list[i].cast<uint32_t>();
-                res = Buffer::create(self, data.data(), count * sizeof(uint32_t), type);
-            } else if (actualType == DataType::UINT16) {
-                std::vector<uint16_t> data(count);
-                for(size_t i=0; i<count; ++i) data[i] = list[i].cast<uint16_t>();
-                res = Buffer::create(self, data.data(), count * sizeof(uint16_t), type);
-            } else if (actualType == DataType::INT32) {
-                std::vector<int32_t> data(count);
-                for(size_t i=0; i<count; ++i) data[i] = list[i].cast<int32_t>();
-                res = Buffer::create(self, data.data(), count * sizeof(int32_t), type);
-            }
-
-            if (res) {
-                return py::cast(res.value());
-            } else {
-                if (auto l = self.logger()) l->log(res.error());
-                throw std::runtime_error(res.error());
-            }
-        }, py::arg("list"), py::arg("type"), py::arg("data_type") = py::none())
-        .def("create_buffer", [](Renderer& self, py::buffer b, BufferType type) -> py::object {
-            py::buffer_info info = b.request();
-            auto res = Buffer::create(self, info.ptr, info.size * info.itemsize, type);
-            if (res) {
-                return py::cast(res.value());
-            } else {
-                if (auto l = self.logger()) l->log(res.error());
-                throw std::runtime_error(res.error());
-            }
-        }, py::arg("array"), py::arg("type"))
-        .def("create_buffer", [](Renderer& self, size_t size_in_bytes, BufferType type) -> py::object {
-            auto res = Buffer::create(self, nullptr, size_in_bytes, type);
-            if (res) {
-                return py::cast(res.value());
-            } else {
-                if (auto l = self.logger()) l->log(res.error());
-                throw std::runtime_error(res.error());
-            }
-        }, py::arg("size_in_bytes"), py::arg("type"))
-        .def("create_command_buffer", [](Renderer& self) -> py::object {
+        }), py::arg("win32_hwnd"), py::arg("context"))
+        .def("begin_frame", &SwapchainRenderer::begin_frame)
+        .def("submit", &SwapchainRenderer::submit)
+        .def("create_command_buffer", [](SwapchainRenderer& self) -> py::object {
             auto res = CommandBuffer::create(self);
             if (res) {
                 return py::cast(res.value());
             } else {
-                if (auto l = self.logger()) l->log(res.error());
+                if (auto l = self.context()->logger()) l->log(res.error());
                 throw std::runtime_error(res.error());
             }
-        })
-        .def("create_pipeline", [](Renderer& self) -> std::shared_ptr<PipelineBuilder> {
-            return std::make_shared<PipelineBuilder>(self);
-        })
-        .def("compile_shader", [](Renderer& self, const std::string& path, ShaderStage stage) -> py::object {
-            auto res = ShaderCompiler::compile(self.device(), path, stage);
-            if (res) {
-                return py::cast(res.value());
-            } else {
-                if (auto l = self.logger()) l->log(res.error());
-                throw std::runtime_error(res.error());
-            }
-        })
-        .def("load_texture", [](Renderer& self, const std::string& path) -> py::object {
-            auto res = Texture::create(self, path);
-            if (res) {
-                return py::cast(res.value());
-            } else {
-                if (auto l = self.logger()) l->log(res.error());
-                throw std::runtime_error(res.error());
-            }
-        })
-        .def("create_descriptor_pool", [](Renderer& self, uint32_t maxSets, uint32_t samplers, uint32_t uniformBuffers, uint32_t storageBuffers) -> py::object {
-            auto res = DescriptorPool::create(self.device(), maxSets, samplers, uniformBuffers, storageBuffers);
-            if (res) {
-                return py::cast(res.value());
-            } else {
-                if (auto l = self.logger()) l->log(res.error());
-                throw std::runtime_error(res.error());
-            }
-        }, py::arg("max_sets"), py::arg("samplers") = 0, py::arg("uniform_buffers") = 0, py::arg("storage_buffers") = 0);
+        });
 
     // ── Key Constants ──
     m.attr("KEY_SPACE") = GLFW_KEY_SPACE;

@@ -13,18 +13,19 @@
 
 class CommandBuffer {
 public:
-    static std::expected<std::shared_ptr<CommandBuffer>, std::string> create(Renderer& renderer) {
-        auto cmd = std::shared_ptr<CommandBuffer>(new CommandBuffer(renderer));
+    static std::expected<std::shared_ptr<CommandBuffer>, std::string> create(SwapchainRenderer& renderer) {
+        auto ctx = renderer.context();
+        auto cmd = std::shared_ptr<CommandBuffer>(new CommandBuffer(ctx));
         
         VkCommandBufferAllocateInfo allocInfo{
             .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
             .pNext = nullptr,
-            .commandPool = renderer.command_pool(),
+            .commandPool = ctx->command_pool(),
             .level = VK_COMMAND_BUFFER_LEVEL_PRIMARY,
-            .commandBufferCount = Renderer::MAX_FRAMES_IN_FLIGHT
+            .commandBufferCount = Context::MAX_FRAMES_IN_FLIGHT
         };
 
-        if (vkAllocateCommandBuffers(renderer.device(), &allocInfo, cmd->command_buffers_.data()) != VK_SUCCESS) {
+        if (vkAllocateCommandBuffers(ctx->device(), &allocInfo, cmd->command_buffers_.data()) != VK_SUCCESS) {
             return std::unexpected("Failed to allocate command buffers!");
         }
         
@@ -32,9 +33,9 @@ public:
     }
 
     ~CommandBuffer() {
-        if (renderer_.device() != VK_NULL_HANDLE && renderer_.command_pool() != VK_NULL_HANDLE) {
-            vkFreeCommandBuffers(renderer_.device(), renderer_.command_pool(), 
-                                 Renderer::MAX_FRAMES_IN_FLIGHT, command_buffers_.data());
+        if (context_) {
+            vkFreeCommandBuffers(context_->device(), context_->command_pool(), 
+                                 Context::MAX_FRAMES_IN_FLIGHT, command_buffers_.data());
         }
     }
 
@@ -50,7 +51,7 @@ public:
         if (clear_color.size() >= 4) {
             cc[0] = clear_color[0]; cc[1] = clear_color[1]; cc[2] = clear_color[2]; cc[3] = clear_color[3];
         }
-        commands_.push_back([cc](VkCommandBuffer cmd, Renderer& renderer) {
+        commands_.push_back([cc](VkCommandBuffer cmd, SwapchainRenderer& renderer) {
             VkImageMemoryBarrier barrier{
                 .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
                 .pNext = nullptr,
@@ -153,7 +154,7 @@ public:
     }
 
     void endRendering() {
-        commands_.push_back([](VkCommandBuffer cmd, Renderer& renderer) {
+        commands_.push_back([](VkCommandBuffer cmd, SwapchainRenderer& renderer) {
             vkCmdEndRendering(cmd);
 
             VkImageMemoryBarrier barrier{
@@ -187,7 +188,7 @@ public:
     }
 
     void setViewport() {
-        commands_.push_back([](VkCommandBuffer cmd, Renderer& renderer) {
+        commands_.push_back([](VkCommandBuffer cmd, SwapchainRenderer& renderer) {
             VkViewport viewport{
                 .x = 0.0f,
                 .y = 0.0f,
@@ -201,7 +202,7 @@ public:
     }
 
     void setScissor() {
-        commands_.push_back([](VkCommandBuffer cmd, Renderer& renderer) {
+        commands_.push_back([](VkCommandBuffer cmd, SwapchainRenderer& renderer) {
             VkRect2D scissor{
                 .offset = {0, 0},
                 .extent = renderer.swapchain_extent()
@@ -211,13 +212,13 @@ public:
     }
 
     void bindPipeline(std::shared_ptr<Pipeline> pipeline) {
-        commands_.push_back([pipeline](VkCommandBuffer cmd, Renderer& renderer) {
+        commands_.push_back([pipeline](VkCommandBuffer cmd, SwapchainRenderer& renderer) {
             vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline->get());
         });
     }
 
     void bindVertexBuffer(std::shared_ptr<Buffer> buffer) {
-        commands_.push_back([buffer](VkCommandBuffer cmd, Renderer& renderer) {
+        commands_.push_back([buffer](VkCommandBuffer cmd, SwapchainRenderer& renderer) {
             VkBuffer vertexBuffers[] = {buffer->get()};
             VkDeviceSize offsets[] = {0};
             vkCmdBindVertexBuffers(cmd, 0, 1, vertexBuffers, offsets);
@@ -225,32 +226,32 @@ public:
     }
 
     void bindIndexBuffer(std::shared_ptr<Buffer> buffer) {
-        commands_.push_back([buffer](VkCommandBuffer cmd, Renderer& renderer) {
+        commands_.push_back([buffer](VkCommandBuffer cmd, SwapchainRenderer& renderer) {
             vkCmdBindIndexBuffer(cmd, buffer->get(), 0, VK_INDEX_TYPE_UINT32);
         });
     }
 
     void draw(uint32_t vertexCount) {
-        commands_.push_back([vertexCount](VkCommandBuffer cmd, Renderer& renderer) {
+        commands_.push_back([vertexCount](VkCommandBuffer cmd, SwapchainRenderer& renderer) {
             vkCmdDraw(cmd, vertexCount, 1, 0, 0);
         });
     }
 
     void drawIndexed(uint32_t indexCount, uint32_t firstIndex = 0, int32_t vertexOffset = 0) {
-        commands_.push_back([indexCount, firstIndex, vertexOffset](VkCommandBuffer cmd, Renderer& renderer) {
+        commands_.push_back([indexCount, firstIndex, vertexOffset](VkCommandBuffer cmd, SwapchainRenderer& renderer) {
             vkCmdDrawIndexed(cmd, indexCount, 1, firstIndex, vertexOffset, 0);
         });
     }
 
     void drawIndexedInstanced(uint32_t indexCount, uint32_t instanceCount, uint32_t firstIndex = 0, int32_t vertexOffset = 0) {
-        commands_.push_back([indexCount, instanceCount, firstIndex, vertexOffset](VkCommandBuffer cmd, Renderer& renderer) {
+        commands_.push_back([indexCount, instanceCount, firstIndex, vertexOffset](VkCommandBuffer cmd, SwapchainRenderer& renderer) {
             vkCmdDrawIndexed(cmd, indexCount, instanceCount, firstIndex, vertexOffset, 0);
         });
     }
 
     void pushConstants(std::shared_ptr<Pipeline> pipeline, ShaderStage stage, uint32_t offset, uint32_t size, const void* data) {
         std::vector<uint8_t> buffer(static_cast<const uint8_t*>(data), static_cast<const uint8_t*>(data) + size);
-        commands_.push_back([pipeline, stage, offset, size, buffer](VkCommandBuffer cmd, Renderer& renderer) {
+        commands_.push_back([pipeline, stage, offset, size, buffer](VkCommandBuffer cmd, SwapchainRenderer& renderer) {
             VkShaderStageFlags stageFlags = (stage == ShaderStage::VERTEX) ? VK_SHADER_STAGE_VERTEX_BIT : VK_SHADER_STAGE_FRAGMENT_BIT;
             vkCmdPushConstants(cmd, pipeline->layout(), stageFlags, offset, size, buffer.data());
         });
@@ -259,7 +260,7 @@ public:
     void bindDescriptorSet(std::shared_ptr<DescriptorSet> descSet,
                            std::shared_ptr<Pipeline> pipeline,
                            uint32_t setIndex) {
-        commands_.push_back([descSet, pipeline, setIndex](VkCommandBuffer cmd, Renderer& renderer) {
+        commands_.push_back([descSet, pipeline, setIndex](VkCommandBuffer cmd, SwapchainRenderer& renderer) {
             VkDescriptorSet set = descSet->get(renderer.current_frame());
             vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
                 pipeline->layout(), setIndex, 1, &set, 0, nullptr);
@@ -267,19 +268,19 @@ public:
     }
 
     VkCommandBuffer get() const { 
-        return command_buffers_[renderer_.current_frame()]; 
+        return command_buffers_[context_->current_frame()]; 
     }
 
-    void execute(VkCommandBuffer vkCmd) {
+    void execute(VkCommandBuffer vkCmd, SwapchainRenderer& renderer) {
         for (auto& cmd_func : commands_) {
-            cmd_func(vkCmd, renderer_);
+            cmd_func(vkCmd, renderer);
         }
     }
 
 private:
-    CommandBuffer(Renderer& renderer) : renderer_(renderer) {}
+    CommandBuffer(std::shared_ptr<Context> context) : context_(context) {}
 
-    Renderer& renderer_;
-    std::array<VkCommandBuffer, Renderer::MAX_FRAMES_IN_FLIGHT> command_buffers_{};
-    std::vector<std::function<void(VkCommandBuffer, Renderer&)>> commands_;
+    std::shared_ptr<Context> context_;
+    std::array<VkCommandBuffer, Context::MAX_FRAMES_IN_FLIGHT> command_buffers_{};
+    std::vector<std::function<void(VkCommandBuffer, SwapchainRenderer&)>> commands_;
 };

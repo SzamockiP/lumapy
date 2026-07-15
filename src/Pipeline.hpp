@@ -8,7 +8,7 @@
 #include <map>
 #include <unordered_map>
 #include "ShaderCompiler.hpp"
-#include "Renderer.hpp"
+#include "Context.hpp"
 
 enum class Format {
     FLOAT2,
@@ -33,23 +33,25 @@ public:
     // Maps binding index -> VkDescriptorType so DescriptorSet knows what type to write
     using BindingTypeMap = std::unordered_map<uint32_t, VkDescriptorType>;
 
-    Pipeline(VkDevice device, VkPipeline pipeline, VkPipelineLayout layout, 
+    Pipeline(std::shared_ptr<Context> context, VkPipeline pipeline, VkPipelineLayout layout, 
              std::vector<VkDescriptorSetLayout> descLayouts = {},
              std::map<uint32_t, BindingTypeMap> bindingTypes = {})
-        : device_(device), pipeline_(pipeline), layout_(layout),
+        : context_(context), pipeline_(pipeline), layout_(layout),
           desc_layouts_(std::move(descLayouts)),
           binding_types_(std::move(bindingTypes)) {}
 
     ~Pipeline() {
-        if (pipeline_ != VK_NULL_HANDLE) {
-            vkDestroyPipeline(device_, pipeline_, nullptr);
-        }
-        if (layout_ != VK_NULL_HANDLE) {
-            vkDestroyPipelineLayout(device_, layout_, nullptr);
-        }
-        for (auto dl : desc_layouts_) {
-            if (dl != VK_NULL_HANDLE) {
-                vkDestroyDescriptorSetLayout(device_, dl, nullptr);
+        if (context_) {
+            if (pipeline_ != VK_NULL_HANDLE) {
+                vkDestroyPipeline(context_->device(), pipeline_, nullptr);
+            }
+            if (layout_ != VK_NULL_HANDLE) {
+                vkDestroyPipelineLayout(context_->device(), layout_, nullptr);
+            }
+            for (auto dl : desc_layouts_) {
+                if (dl != VK_NULL_HANDLE) {
+                    vkDestroyDescriptorSetLayout(context_->device(), dl, nullptr);
+                }
             }
         }
     }
@@ -58,7 +60,7 @@ public:
     Pipeline& operator=(const Pipeline&) = delete;
 
     Pipeline(Pipeline&& other) noexcept
-        : device_(other.device_), pipeline_(other.pipeline_), layout_(other.layout_),
+        : context_(std::move(other.context_)), pipeline_(other.pipeline_), layout_(other.layout_),
           desc_layouts_(std::move(other.desc_layouts_)),
           binding_types_(std::move(other.binding_types_)) {
         other.pipeline_ = VK_NULL_HANDLE;
@@ -67,18 +69,20 @@ public:
 
     Pipeline& operator=(Pipeline&& other) noexcept {
         if (this != &other) {
-            if (pipeline_ != VK_NULL_HANDLE) {
-                vkDestroyPipeline(device_, pipeline_, nullptr);
-            }
-            if (layout_ != VK_NULL_HANDLE) {
-                vkDestroyPipelineLayout(device_, layout_, nullptr);
-            }
-            for (auto dl : desc_layouts_) {
-                if (dl != VK_NULL_HANDLE) {
-                    vkDestroyDescriptorSetLayout(device_, dl, nullptr);
+            if (context_) {
+                if (pipeline_ != VK_NULL_HANDLE) {
+                    vkDestroyPipeline(context_->device(), pipeline_, nullptr);
+                }
+                if (layout_ != VK_NULL_HANDLE) {
+                    vkDestroyPipelineLayout(context_->device(), layout_, nullptr);
+                }
+                for (auto dl : desc_layouts_) {
+                    if (dl != VK_NULL_HANDLE) {
+                        vkDestroyDescriptorSetLayout(context_->device(), dl, nullptr);
+                    }
                 }
             }
-            device_ = other.device_;
+            context_ = std::move(other.context_);
             pipeline_ = other.pipeline_;
             layout_ = other.layout_;
             desc_layouts_ = std::move(other.desc_layouts_);
@@ -114,7 +118,7 @@ public:
     }
 
 private:
-    VkDevice device_;
+    std::shared_ptr<Context> context_;
     VkPipeline pipeline_;
     VkPipelineLayout layout_;
     std::vector<VkDescriptorSetLayout> desc_layouts_;
@@ -123,7 +127,7 @@ private:
 
 class PipelineBuilder {
 public:
-    PipelineBuilder(Renderer& renderer) : renderer_(renderer) {}
+    PipelineBuilder(Context& context) : context_(context) {}
 
     PipelineBuilder& vertexShader(std::shared_ptr<ShaderModule> shader) {
         vertex_shader_ = shader;
@@ -178,7 +182,8 @@ public:
         return addDescriptorBinding_(binding, stage, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, set);
     }
 
-    std::expected<std::shared_ptr<Pipeline>, std::string> build() {
+    // Build the pipeline with explicit color/depth formats (decoupled from renderer)
+    std::expected<std::shared_ptr<Pipeline>, std::string> build(VkFormat colorFormat, VkFormat depthFormat) {
         if (!vertex_shader_ || !fragment_shader_) {
             return std::unexpected("Vertex and fragment shaders must be provided");
         }
@@ -230,10 +235,10 @@ public:
                     };
 
                     VkDescriptorSetLayout layout;
-                    if (vkCreateDescriptorSetLayout(renderer_.device(), &layoutInfo, nullptr, &layout) != VK_SUCCESS) {
+                    if (vkCreateDescriptorSetLayout(context_.device(), &layoutInfo, nullptr, &layout) != VK_SUCCESS) {
                         // Cleanup already created layouts
                         for (auto dl : descriptorSetLayouts) {
-                            vkDestroyDescriptorSetLayout(renderer_.device(), dl, nullptr);
+                            vkDestroyDescriptorSetLayout(context_.device(), dl, nullptr);
                         }
                         return std::unexpected("Failed to create descriptor set layout for set " + std::to_string(s));
                     }
@@ -256,9 +261,9 @@ public:
                     };
 
                     VkDescriptorSetLayout layout;
-                    if (vkCreateDescriptorSetLayout(renderer_.device(), &layoutInfo, nullptr, &layout) != VK_SUCCESS) {
+                    if (vkCreateDescriptorSetLayout(context_.device(), &layoutInfo, nullptr, &layout) != VK_SUCCESS) {
                         for (auto dl : descriptorSetLayouts) {
-                            vkDestroyDescriptorSetLayout(renderer_.device(), dl, nullptr);
+                            vkDestroyDescriptorSetLayout(context_.device(), dl, nullptr);
                         }
                         return std::unexpected("Failed to create empty descriptor set layout for set " + std::to_string(s));
                     }
@@ -424,22 +429,21 @@ public:
         };
 
         VkPipelineLayout pipelineLayout;
-        if (vkCreatePipelineLayout(renderer_.device(), &pipelineLayoutInfo, nullptr, &pipelineLayout) != VK_SUCCESS) {
+        if (vkCreatePipelineLayout(context_.device(), &pipelineLayoutInfo, nullptr, &pipelineLayout) != VK_SUCCESS) {
             for (auto dl : descriptorSetLayouts) {
-                vkDestroyDescriptorSetLayout(renderer_.device(), dl, nullptr);
+                vkDestroyDescriptorSetLayout(context_.device(), dl, nullptr);
             }
             return std::unexpected("Failed to create pipeline layout!");
         }
 
         // Dynamic Rendering Info
-        VkFormat colorFormat = renderer_.swapchain_format();
         VkPipelineRenderingCreateInfo pipelineRenderingCreateInfo{
             .sType = VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO,
             .pNext = nullptr,
             .viewMask = 0,
             .colorAttachmentCount = 1,
             .pColorAttachmentFormats = &colorFormat,
-            .depthAttachmentFormat = renderer_.depth_format() != VK_FORMAT_UNDEFINED ? renderer_.depth_format() : VK_FORMAT_UNDEFINED,
+            .depthAttachmentFormat = depthFormat != VK_FORMAT_UNDEFINED ? depthFormat : VK_FORMAT_UNDEFINED,
             .stencilAttachmentFormat = VK_FORMAT_UNDEFINED
         };
 
@@ -466,15 +470,15 @@ public:
         };
 
         VkPipeline graphicsPipeline;
-        if (vkCreateGraphicsPipelines(renderer_.device(), VK_NULL_HANDLE, 1, &pipelineInfo, nullptr, &graphicsPipeline) != VK_SUCCESS) {
-            vkDestroyPipelineLayout(renderer_.device(), pipelineLayout, nullptr);
+        if (vkCreateGraphicsPipelines(context_.device(), VK_NULL_HANDLE, 1, &pipelineInfo, nullptr, &graphicsPipeline) != VK_SUCCESS) {
+            vkDestroyPipelineLayout(context_.device(), pipelineLayout, nullptr);
             for (auto dl : descriptorSetLayouts) {
-                vkDestroyDescriptorSetLayout(renderer_.device(), dl, nullptr);
+                vkDestroyDescriptorSetLayout(context_.device(), dl, nullptr);
             }
             return std::unexpected("Failed to create graphics pipeline!");
         }
 
-        return std::make_shared<Pipeline>(renderer_.device(), graphicsPipeline, pipelineLayout,
+        return std::make_shared<Pipeline>(context_.shared_from_this(), graphicsPipeline, pipelineLayout,
                                           std::move(descriptorSetLayouts), std::move(allBindingTypes));
     }
 
@@ -502,7 +506,7 @@ private:
         return *this;
     }
 
-    Renderer& renderer_;
+    Context& context_;
     std::shared_ptr<ShaderModule> vertex_shader_;
     std::shared_ptr<ShaderModule> fragment_shader_;
     std::vector<Format> formats_;

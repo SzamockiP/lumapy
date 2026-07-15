@@ -50,15 +50,16 @@ logger = bz.Logger()
 logger.on_error(lambda msg: print(msg))
 
 window = bz.Window(1024, 720, "Bazalt Demo - 3D Cube")
-renderer = bz.Renderer(window, logger)
+ctx = bz.Context(logger)
+renderer = bz.SwapchainRenderer(window, ctx)
 window.set_cursor_mode(bz.CURSOR_DISABLED)
 
 # Compile shaders
-vert_spv = renderer.compile_shader("cube.vert", bz.ShaderStage.VERTEX)
-frag_spv = renderer.compile_shader("cube.frag", bz.ShaderStage.FRAGMENT)
+vert_spv = ctx.compile_shader("cube.vert", bz.ShaderStage.VERTEX)
+frag_spv = ctx.compile_shader("cube.frag", bz.ShaderStage.FRAGMENT)
 
 # Build pipeline
-pipeline = (renderer.create_pipeline()
+pipeline = (ctx.pipeline_builder()
     .vertex_shader(vert_spv)
     .fragment_shader(frag_spv)
     .vertex_format([bz.Format.FLOAT3, bz.Format.FLOAT3])
@@ -66,7 +67,7 @@ pipeline = (renderer.create_pipeline()
     .cull_mode(bz.CullMode.BACK, bz.FrontFace.COUNTER_CLOCKWISE)
     .blend(False)
     .uniform_buffer(0, bz.ShaderStage.VERTEX, set=0)
-    .build())
+    .build(renderer))
 
 # Vertex data: pos (x,y,z), normal (nx,ny,nz)
 vertices = np.array([
@@ -101,7 +102,7 @@ vertices = np.array([
      0.5,  0.5,  0.5,   0.0, 1.0, 0.0,
     -0.5,  0.5,  0.5,   0.0, 1.0, 0.0,
 ], dtype=np.float32)
-vbuf = renderer.create_buffer(vertices, bz.BufferType.VERTEX)
+vbuf = ctx.create_buffer(vertices, bz.BufferType.VERTEX)
 
 indices = np.array([
     0, 1, 2, 2, 3, 0,       # Front
@@ -111,12 +112,12 @@ indices = np.array([
     16, 17, 18, 18, 19, 16, # Top
     23, 22, 21, 21, 20, 23  # Bottom
 ], dtype=np.uint32)
-ibuf = renderer.create_buffer(indices, bz.BufferType.INDEX)
+ibuf = ctx.create_buffer(indices, bz.BufferType.INDEX)
 
-ubuf = renderer.create_buffer(np.zeros(16, dtype=np.float32), bz.BufferType.UNIFORM)
+ubuf = ctx.create_buffer(np.zeros(16, dtype=np.float32), bz.BufferType.UNIFORM)
 
 # Descriptors
-pool = renderer.create_descriptor_pool(max_sets=2, uniform_buffers=2)
+pool = ctx.create_descriptor_pool(max_sets=2, uniform_buffers=2)
 desc_set = pool.allocate_frame_set(pipeline, set=0)
 desc_set.set_buffer(0, ubuf)
 

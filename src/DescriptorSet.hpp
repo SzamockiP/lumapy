@@ -5,7 +5,7 @@
 #include <expected>
 #include <stdexcept>
 #include <unordered_map>
-#include "Renderer.hpp"
+#include "Context.hpp"
 #include "Pipeline.hpp"
 #include "Texture.hpp"
 #include "Buffer.hpp"
@@ -13,13 +13,15 @@
 class DescriptorSet {
 public:
     // sets: 1 element (static) or MAX_FRAMES_IN_FLIGHT elements (frame)
-    DescriptorSet(VkDevice device, std::vector<VkDescriptorSet> sets,
+    DescriptorSet(std::shared_ptr<Context> context, std::vector<VkDescriptorSet> sets,
                   Pipeline::BindingTypeMap bindingTypes, bool isFrameSet)
-        : device_(device), sets_(std::move(sets)),
+        : context_(context), sets_(std::move(sets)),
           binding_types_(std::move(bindingTypes)), is_frame_set_(isFrameSet) {}
 
     // Write a texture to this descriptor set (all copies)
     void setTexture(uint32_t binding, std::shared_ptr<Texture> texture) {
+        if (!context_) return;
+
         VkDescriptorImageInfo imageInfo{
             .sampler = texture->sampler(),
             .imageView = texture->image_view(),
@@ -39,7 +41,7 @@ public:
                 .pBufferInfo = nullptr,
                 .pTexelBufferView = nullptr
             };
-            vkUpdateDescriptorSets(device_, 1, &write, 0, nullptr);
+            vkUpdateDescriptorSets(context_->device(), 1, &write, 0, nullptr);
         }
         textures_.push_back(texture);
     }
@@ -48,6 +50,8 @@ public:
     // For frame descriptor sets + DynamicBuffer: writes per-frame buffer to each copy
     // For static descriptor sets + DynamicBuffer: throws RuntimeError
     void setBuffer(uint32_t binding, std::shared_ptr<Buffer> buffer) {
+        if (!context_) return;
+
         if (!is_frame_set_ && buffer->is_dynamic()) {
             throw std::runtime_error(
                 "Cannot bind DynamicBuffer to a static DescriptorSet. "
@@ -79,7 +83,7 @@ public:
                 .pBufferInfo = &bufferInfo,
                 .pTexelBufferView = nullptr
             };
-            vkUpdateDescriptorSets(device_, 1, &write, 0, nullptr);
+            vkUpdateDescriptorSets(context_->device(), 1, &write, 0, nullptr);
         }
         buffers_.push_back(buffer);
     }
@@ -95,7 +99,7 @@ public:
     bool is_frame_set() const { return is_frame_set_; }
 
 private:
-    VkDevice device_;
+    std::shared_ptr<Context> context_;
     std::vector<VkDescriptorSet> sets_;
     Pipeline::BindingTypeMap binding_types_;
     bool is_frame_set_;
@@ -107,7 +111,7 @@ private:
 class DescriptorPool {
 public:
     static std::expected<std::shared_ptr<DescriptorPool>, std::string> create(
-        VkDevice device,
+        Context& context,
         uint32_t maxSets,
         uint32_t samplerCount,
         uint32_t uniformBufferCount,
@@ -148,16 +152,16 @@ public:
         };
 
         VkDescriptorPool pool;
-        if (vkCreateDescriptorPool(device, &poolInfo, nullptr, &pool) != VK_SUCCESS) {
+        if (vkCreateDescriptorPool(context.device(), &poolInfo, nullptr, &pool) != VK_SUCCESS) {
             return std::unexpected("Failed to create descriptor pool");
         }
 
-        return std::shared_ptr<DescriptorPool>(new DescriptorPool(device, pool));
+        return std::shared_ptr<DescriptorPool>(new DescriptorPool(context.shared_from_this(), pool));
     }
 
     ~DescriptorPool() {
-        if (pool_ != VK_NULL_HANDLE) {
-            vkDestroyDescriptorPool(device_, pool_, nullptr);
+        if (pool_ != VK_NULL_HANDLE && context_) {
+            vkDestroyDescriptorPool(context_->device(), pool_, nullptr);
         }
     }
 
@@ -167,6 +171,8 @@ public:
     // Allocate a static descriptor set (1 VkDescriptorSet)
     std::expected<std::shared_ptr<DescriptorSet>, std::string>
     allocateDescriptorSet(std::shared_ptr<Pipeline> pipeline, uint32_t setIndex) {
+        if (!context_) return std::unexpected("Context destroyed");
+
         VkDescriptorSetLayout layout = pipeline->descriptor_set_layout(setIndex);
         if (layout == VK_NULL_HANDLE) {
             return std::unexpected("Pipeline has no descriptor set layout at set index " + std::to_string(setIndex));
@@ -181,46 +187,48 @@ public:
         };
 
         VkDescriptorSet set;
-        if (vkAllocateDescriptorSets(device_, &allocInfo, &set) != VK_SUCCESS) {
+        if (vkAllocateDescriptorSets(context_->device(), &allocInfo, &set) != VK_SUCCESS) {
             return std::unexpected("Failed to allocate descriptor set from pool (pool may be full)");
         }
 
         return std::make_shared<DescriptorSet>(
-            device_, std::vector<VkDescriptorSet>{set},
+            context_, std::vector<VkDescriptorSet>{set},
             pipeline->binding_types(setIndex), false);
     }
 
     // Allocate a frame descriptor set (MAX_FRAMES_IN_FLIGHT VkDescriptorSets)
     std::expected<std::shared_ptr<DescriptorSet>, std::string>
     allocateFrameDescriptorSet(std::shared_ptr<Pipeline> pipeline, uint32_t setIndex) {
+        if (!context_) return std::unexpected("Context destroyed");
+
         VkDescriptorSetLayout layout = pipeline->descriptor_set_layout(setIndex);
         if (layout == VK_NULL_HANDLE) {
             return std::unexpected("Pipeline has no descriptor set layout at set index " + std::to_string(setIndex));
         }
 
-        std::vector<VkDescriptorSetLayout> layouts(Renderer::MAX_FRAMES_IN_FLIGHT, layout);
+        std::vector<VkDescriptorSetLayout> layouts(Context::MAX_FRAMES_IN_FLIGHT, layout);
         VkDescriptorSetAllocateInfo allocInfo{
             .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO,
             .pNext = nullptr,
             .descriptorPool = pool_,
-            .descriptorSetCount = Renderer::MAX_FRAMES_IN_FLIGHT,
+            .descriptorSetCount = Context::MAX_FRAMES_IN_FLIGHT,
             .pSetLayouts = layouts.data()
         };
 
-        std::vector<VkDescriptorSet> sets(Renderer::MAX_FRAMES_IN_FLIGHT);
-        if (vkAllocateDescriptorSets(device_, &allocInfo, sets.data()) != VK_SUCCESS) {
+        std::vector<VkDescriptorSet> sets(Context::MAX_FRAMES_IN_FLIGHT);
+        if (vkAllocateDescriptorSets(context_->device(), &allocInfo, sets.data()) != VK_SUCCESS) {
             return std::unexpected("Failed to allocate frame descriptor sets from pool (pool may be full)");
         }
 
         return std::make_shared<DescriptorSet>(
-            device_, std::move(sets),
+            context_, std::move(sets),
             pipeline->binding_types(setIndex), true);
     }
 
 private:
-    DescriptorPool(VkDevice device, VkDescriptorPool pool)
-        : device_(device), pool_(pool) {}
+    DescriptorPool(std::shared_ptr<Context> context, VkDescriptorPool pool)
+        : context_(context), pool_(pool) {}
 
-    VkDevice device_;
+    std::shared_ptr<Context> context_;
     VkDescriptorPool pool_ = VK_NULL_HANDLE;
 };

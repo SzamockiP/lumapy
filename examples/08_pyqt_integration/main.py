@@ -16,8 +16,9 @@ class VulkanWidget(QWidget):
         def on_err(msg):
             print(f"[Vulkan Error]: {msg}")
 
-        # 2. Initialize Bazalt Renderer and connect directly to native Win32 window handle
-        self.renderer = bz.Renderer(win32_hwnd=int(self.winId()), logger=self.logger)
+        # 2. Initialize Bazalt Context and SwapchainRenderer (connected directly to native Win32 window handle)
+        self.ctx = bz.Context(self.logger)
+        self.renderer = bz.SwapchainRenderer(win32_hwnd=int(self.winId()), context=self.ctx)
 
         self.setup_vulkan()
         
@@ -33,15 +34,15 @@ class VulkanWidget(QWidget):
         frag_path = os.path.join(script_dir, "triangle.frag")
         
         # Compile GLSL shaders
-        vert_spv = self.renderer.compile_shader(vert_path, bz.ShaderStage.VERTEX)
-        frag_spv = self.renderer.compile_shader(frag_path, bz.ShaderStage.FRAGMENT)
+        vert_spv = self.ctx.compile_shader(vert_path, bz.ShaderStage.VERTEX)
+        frag_spv = self.ctx.compile_shader(frag_path, bz.ShaderStage.FRAGMENT)
         
         # Create pipeline: Position + Color
-        self.pipeline = (self.renderer.create_pipeline()
+        self.pipeline = (self.ctx.pipeline_builder()
             .vertex_shader(vert_spv)
             .fragment_shader(frag_spv)
             .vertex_format([bz.Format.FLOAT3, bz.Format.FLOAT3])
-            .build())
+            .build(self.renderer))
             
         # Triangle geometry
         vertices = [
@@ -49,9 +50,9 @@ class VulkanWidget(QWidget):
             -0.5,  0.5, 0.0,   0.0, 1.0, 0.0, # Bottom-Left / Green
              0.5,  0.5, 0.0,   0.0, 0.0, 1.0, # Bottom-Right / Blue
         ]
-        self.vbuf = self.renderer.create_buffer(vertices, bz.BufferType.VERTEX, bz.DataType.FLOAT)
+        self.vbuf = self.ctx.create_buffer(vertices, bz.BufferType.VERTEX, bz.DataType.FLOAT)
         
-        self.ibuf = self.renderer.create_buffer([0, 1, 2], bz.BufferType.INDEX, bz.DataType.UINT32)
+        self.ibuf = self.ctx.create_buffer([0, 1, 2], bz.BufferType.INDEX, bz.DataType.UINT32)
         
         # Record commands
         self.cmd = self.renderer.create_command_buffer()

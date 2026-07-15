@@ -75,7 +75,8 @@ class DemoApp:
         self.window = bz.Window(1024, 720, "Bazalt Demo - Model Loader")
         self.logger = bz.Logger()
         self.logger.on_error(self.on_error)
-        self.renderer = bz.Renderer(self.window, self.logger)
+        self.ctx = bz.Context(self.logger)
+        self.renderer = bz.SwapchainRenderer(self.window, self.ctx)
         self.window.set_cursor_mode(bz.CURSOR_DISABLED)
         
         self.camera = Camera()
@@ -98,11 +99,11 @@ class DemoApp:
 
     def setup_pipeline(self, script_dir):
         # Compile GLSL shaders
-        vert_spv = self.renderer.compile_shader(os.path.join(script_dir, "model.vert"), bz.ShaderStage.VERTEX)
-        frag_spv = self.renderer.compile_shader(os.path.join(script_dir, "model.frag"), bz.ShaderStage.FRAGMENT)
+        vert_spv = self.ctx.compile_shader(os.path.join(script_dir, "model.vert"), bz.ShaderStage.VERTEX)
+        frag_spv = self.ctx.compile_shader(os.path.join(script_dir, "model.frag"), bz.ShaderStage.FRAGMENT)
 
         # Create a graphics pipeline using a builder pattern
-        self.pipeline = (self.renderer.create_pipeline()
+        self.pipeline = (self.ctx.pipeline_builder()
             .vertex_shader(vert_spv)
             .fragment_shader(frag_spv)
             .vertex_format([bz.Format.FLOAT3, bz.Format.FLOAT3, bz.Format.FLOAT2, bz.Format.FLOAT3])
@@ -110,10 +111,10 @@ class DemoApp:
             .cull_mode(bz.CullMode.BACK, bz.FrontFace.COUNTER_CLOCKWISE)
             .uniform_buffer(0, bz.ShaderStage.VERTEX, set=0)
             .texture(0, bz.ShaderStage.FRAGMENT, set=1)
-            .build())
+            .build(self.renderer))
 
         # 3 * mat4 = 192 bytes
-        self.ubuf = self.renderer.create_buffer(192, bz.BufferType.UNIFORM)
+        self.ubuf = self.ctx.create_buffer(192, bz.BufferType.UNIFORM)
 
     def load_scene(self, obj_path):
         print("Loading model...")
@@ -124,7 +125,7 @@ class DemoApp:
         self.loaded_textures = {}
         
         white_png_path = os.path.join(self.assets_dir, "white.png")
-        self.default_texture = self.renderer.load_texture(white_png_path)
+        self.default_texture = self.ctx.load_texture(white_png_path)
         
         all_vertices, all_normals, all_uvs, all_colors, all_faces = [], [], [], [], []
         self.draw_calls = []
@@ -161,7 +162,7 @@ class DemoApp:
                         tex_file = tex_file if os.path.isabs(tex_file) else os.path.normpath(os.path.join(obj_dir, tex_file))
                         if os.path.exists(tex_file):
                             if tex_file not in self.loaded_textures:
-                                self.loaded_textures[tex_file] = self.renderer.load_texture(tex_file)
+                                self.loaded_textures[tex_file] = self.ctx.load_texture(tex_file)
                             tex = self.loaded_textures[tex_file]
             
             colors = np.tile(mat_color, (len(vertices), 1)).astype(np.float32)
@@ -190,12 +191,12 @@ class DemoApp:
         interleaved[:, 6:8] = np.concatenate(all_uvs)
         interleaved[:, 8:11] = np.concatenate(all_colors)
         
-        self.vbuf = self.renderer.create_buffer(interleaved.flatten(), bz.BufferType.VERTEX)
-        self.ibuf = self.renderer.create_buffer(np.concatenate(all_faces).flatten().astype(np.uint32), bz.BufferType.INDEX)
+        self.vbuf = self.ctx.create_buffer(interleaved.flatten(), bz.BufferType.VERTEX)
+        self.ibuf = self.ctx.create_buffer(np.concatenate(all_faces).flatten().astype(np.uint32), bz.BufferType.INDEX)
 
     def setup_descriptors(self):
         # Create Descriptor Pool and allocate descriptor set
-        self.pool = self.renderer.create_descriptor_pool(
+        self.pool = self.ctx.create_descriptor_pool(
             max_sets=3 + len(self.loaded_textures), 
             uniform_buffers=2, 
             samplers=1 + len(self.loaded_textures)

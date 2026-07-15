@@ -2,7 +2,8 @@
 
 from bazalt._core import *  # noqa: F401, F403
 from bazalt._core import (  # noqa: F401 — explicit re-exports for IDE visibility
-    Renderer,
+    Context,
+    SwapchainRenderer,
     Window,
     Logger,
     Buffer,
@@ -22,11 +23,12 @@ from bazalt._core import (  # noqa: F401 — explicit re-exports for IDE visibil
     FrontFace,
 )
 
-__version__ = "0.2.0"
+__version__ = "0.3.0"
 
 __all__ = [
     # Core
-    "Renderer",
+    "Context",
+    "SwapchainRenderer",
     "Window",
     "Logger",
     # Resources

@@ -17,11 +17,11 @@ pip install bazalt
 - **Automatic Shader Compilation:** Compile GLSL shaders (Vertex/Fragment) directly from your code.
 - **Pipeline & Buffer Management:** Easy builder pattern for graphics pipelines and unified buffer creation.
 - **Command Buffers:** Explicit, yet simple command recording for drawing operations.
-- **Decoupled Architecture:** Clean separation of concerns between Windowing (GLFW), Logging, and Vulkan Rendering.
+- **Decoupled Architecture:** Clean separation of concerns between Windowing (GLFW), Vulkan Context (GPU initialization), and Surface Presenting (SwapchainRenderer).
 
 ## Quick Start: Drawing a Triangle
 
-Here is a minimal example demonstrating how to initialize the window, logger, and renderer, compile shaders, create a pipeline, and draw a colorful triangle.
+Here is a minimal example demonstrating how to initialize the window, Vulkan Context, and SwapchainRenderer, compile shaders, create a pipeline, and draw a colorful triangle.
 
 ```python
 import bazalt as bz
@@ -32,24 +32,26 @@ logger = bz.Logger()
 def error(msg):
     print(f"Error: {msg}")
 
-# 2. Create the window and the renderer
+# 2. Create the window, Vulkan Context, and SwapchainRenderer
 window = bz.Window(1024, 720, "Bazalt Demo - Triangle")
-renderer = bz.Renderer(window, logger)
+ctx = bz.Context(logger)
+renderer = bz.SwapchainRenderer(window, ctx)
 
 if __name__ == "__main__":
     # Load and compile shaders. The vertex shader processes our geometry,
     # and the fragment shader determines the final color of the pixels.
-    vert_spv = renderer.compile_shader("triangle.vert", bz.ShaderStage.VERTEX)
-    frag_spv = renderer.compile_shader("triangle.frag", bz.ShaderStage.FRAGMENT)
+    # Shaders are compiled through the Context.
+    vert_spv = ctx.compile_shader("triangle.vert", bz.ShaderStage.VERTEX)
+    frag_spv = ctx.compile_shader("triangle.frag", bz.ShaderStage.FRAGMENT)
 
     # The pipeline is a baked state object that tells the GPU how to interpret our data.
-    # vertex_format specifies that each vertex consists of 6 floats:
-    # 3 for Position (layout location=0) and 3 for Color (layout location=1).
-    pipeline = (renderer.create_pipeline()
+    # It is built via the Context's pipeline_builder and compiled against the renderer
+    # to inherit compatible color/depth format options.
+    pipeline = (ctx.pipeline_builder()
         .vertex_shader(vert_spv)
         .fragment_shader(frag_spv)
         .vertex_format([bz.Format.FLOAT3, bz.Format.FLOAT3]) # Position + Color
-        .build())
+        .build(renderer))
 
     # We interleave Position (x,y,z) and Color (r,g,b) in a single flat array.
     # Vulkan's Normalized Device Coordinates (NDC) range from -1 to 1,
@@ -60,11 +62,11 @@ if __name__ == "__main__":
          0.5,  0.5, 0.0,   0.0, 0.0, 1.0, # Bottom-Right / Blue
     ]
     
-    # Create Vertex Buffer
-    vbuf = renderer.create_buffer(vertices, bz.BufferType.VERTEX, bz.DataType.FLOAT)
+    # Create Vertex Buffer through the Context
+    vbuf = ctx.create_buffer(vertices, bz.BufferType.VERTEX, bz.DataType.FLOAT)
     
-    # Create Index Buffer
-    ibuf = renderer.create_buffer([0, 1, 2], bz.BufferType.INDEX, bz.DataType.UINT32)
+    # Create Index Buffer through the Context
+    ibuf = ctx.create_buffer([0, 1, 2], bz.BufferType.INDEX, bz.DataType.UINT32)
 
     # Command buffers store a sequence of commands for the GPU.
     # For a static triangle, we can record this buffer once during initialization 

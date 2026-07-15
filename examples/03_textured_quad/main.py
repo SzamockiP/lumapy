@@ -7,22 +7,23 @@ def error(msg):
     print(msg)
 
 window = bz.Window(800, 600, "Bazalt Demo - Textured Quad")
-renderer = bz.Renderer(window, logger)
+ctx = bz.Context(logger)
+renderer = bz.SwapchainRenderer(window, ctx)
 
 # Compile shaders
-vert_spv = renderer.compile_shader("quad_tex.vert", bz.ShaderStage.VERTEX)
-frag_spv = renderer.compile_shader("quad_tex.frag", bz.ShaderStage.FRAGMENT)
+vert_spv = ctx.compile_shader("quad_tex.vert", bz.ShaderStage.VERTEX)
+frag_spv = ctx.compile_shader("quad_tex.frag", bz.ShaderStage.FRAGMENT)
 
 # Load texture
-texture = renderer.load_texture("../assets/wall.png")
+texture = ctx.load_texture("../assets/wall.png")
 
 # Build pipeline: Position (FLOAT2) + UV (FLOAT2)
-pipeline = (renderer.create_pipeline()
+pipeline = (ctx.pipeline_builder()
     .vertex_shader(vert_spv)
     .fragment_shader(frag_spv)
     .vertex_format([bz.Format.FLOAT2, bz.Format.FLOAT2])
     .texture(0, bz.ShaderStage.FRAGMENT, set=0)
-    .build())
+    .build(renderer))
 
 # Geometry with interleaved Position (x,y) and UV (u,v)
 vertices = [
@@ -31,13 +32,13 @@ vertices = [
      0.5,  0.5,  1.0, 1.0,
     -0.5,  0.5,  0.0, 1.0,
 ]
-vbuf = renderer.create_buffer(vertices, bz.BufferType.VERTEX, bz.DataType.FLOAT)
+vbuf = ctx.create_buffer(vertices, bz.BufferType.VERTEX, bz.DataType.FLOAT)
 
 indices = [0, 1, 2, 2, 3, 0]
-ibuf = renderer.create_buffer(indices, bz.BufferType.INDEX, bz.DataType.UINT32)
+ibuf = ctx.create_buffer(indices, bz.BufferType.INDEX, bz.DataType.UINT32)
 
 # Descriptors
-pool = renderer.create_descriptor_pool(max_sets=1, samplers=1)
+pool = ctx.create_descriptor_pool(max_sets=1, samplers=1)
 desc_set = pool.allocate_set(pipeline, set=0)
 desc_set.set_texture(0, texture)
 

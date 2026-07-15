@@ -7,18 +7,19 @@ def error(msg):
     print(f"Error: {msg}")
 
 window = bz.Window(1024, 720, "Bazalt Demo - Triangle")
-renderer = bz.Renderer(window, logger)
+ctx = bz.Context(logger)
+renderer = bz.SwapchainRenderer(window, ctx)
 
 # Load and compile shaders
-vert_spv = renderer.compile_shader("triangle.vert", bz.ShaderStage.VERTEX)
-frag_spv = renderer.compile_shader("triangle.frag", bz.ShaderStage.FRAGMENT)
+vert_spv = ctx.compile_shader("triangle.vert", bz.ShaderStage.VERTEX)
+frag_spv = ctx.compile_shader("triangle.frag", bz.ShaderStage.FRAGMENT)
 
 # Build pipeline: Position (FLOAT3) + Color (FLOAT3)
-pipeline = (renderer.create_pipeline()
+pipeline = (ctx.pipeline_builder()
     .vertex_shader(vert_spv)
     .fragment_shader(frag_spv)
     .vertex_format([bz.Format.FLOAT3, bz.Format.FLOAT3])
-    .build())
+    .build(renderer))
 
 # Interleaved Position (x,y,z) and Color (r,g,b)
 vertices = [
@@ -26,10 +27,10 @@ vertices = [
     -0.5,  0.5, 0.0,   0.0, 1.0, 0.0, # Bottom-Left / Green
      0.5,  0.5, 0.0,   0.0, 0.0, 1.0, # Bottom-Right / Blue
 ]
-vbuf = renderer.create_buffer(vertices, bz.BufferType.VERTEX, bz.DataType.FLOAT)
+vbuf = ctx.create_buffer(vertices, bz.BufferType.VERTEX, bz.DataType.FLOAT)
 
 indices = [0, 1, 2]
-ibuf = renderer.create_buffer(indices, bz.BufferType.INDEX, bz.DataType.UINT32)
+ibuf = ctx.create_buffer(indices, bz.BufferType.INDEX, bz.DataType.UINT32)
 
 # Record command buffer once
 cmd = renderer.create_command_buffer()

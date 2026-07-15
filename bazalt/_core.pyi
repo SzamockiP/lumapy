@@ -167,8 +167,12 @@ class PipelineBuilder:
         """Declare a combined image sampler descriptor binding."""
         ...
 
-    def build(self) -> Pipeline:
-        """Compile the pipeline. Raises ``RuntimeError`` on failure."""
+    def build(self, renderer: SwapchainRenderer) -> Pipeline:
+        """Compile the pipeline for a given renderer. Raises ``RuntimeError`` on failure.
+
+        Args:
+            renderer: The swapchain renderer providing color/depth format information.
+        """
         ...
 
 # ── Command Buffer ─────────────────────────────────────────────────────
@@ -177,7 +181,7 @@ class CommandBuffer:
     """Deferred GPU command recorder.
 
     Commands are recorded once via the ``begin…``/``end…`` methods,
-    then replayed every frame when passed to ``Renderer.submit()``.
+    then replayed every frame when passed to ``SwapchainRenderer.submit()``.
     """
 
     def begin(self) -> None:
@@ -310,52 +314,31 @@ class Window:
         """Current window height in pixels (updates on resize)."""
         ...
 
-# ── Renderer ───────────────────────────────────────────────────────────
+# ── Logger ─────────────────────────────────────────────────────────────
 
-class Renderer:
-    """Manages the Vulkan context, device queues, swapchain and resources."""
+class Logger:
+    """Asynchronous validation/error logger."""
 
     def __init__(self) -> None: ...
 
-    def connect(self, window: Window) -> None:
-        """Connect the renderer to a window and initialize Vulkan swapchain/surface.
-
-        Args:
-            window: The window to render to.
-        """
-        ...
-
-    def connect_win32(self, hwnd: int) -> None:
-        """Connect the renderer to a native Win32 window (HWND) and initialize Vulkan.
-
-        Args:
-            hwnd: The HWND handle of the window.
-        """
-        ...
-
-    def begin_frame(self) -> bool:
-        """Acquire the next swapchain image.
-
-        Returns ``True`` if successful, or ``False`` if the frame should be skipped (e.g. window minimized).
-        """
-        ...
-
-    def submit(self, cmd: CommandBuffer) -> None:
-        """Submit a recorded command buffer for the current frame to the presentation queue."""
-        ...
-
     def on_error(self, callback: Callable[[str], None]) -> Callable[[str], None]:
-        """Register an error/log callback. Can be used as a decorator::
-
-            @renderer.on_error
-            def on_error(msg: str):
-                print(msg)
-        """
+        """Register an error/log callback. Can be used as a decorator."""
         ...
 
     def log(self, msg: str) -> None:
-        """Send a message to the logger (delivered asynchronously to error callbacks)."""
+        """Send a message to the logger."""
         ...
+
+# ── Context ────────────────────────────────────────────────────────────
+
+class Context:
+    """Manages the Vulkan instance, device, queues, allocator, and command pool.
+
+    This is the shared GPU context that can be used by one or more renderers.
+    Resources (buffers, textures, shaders, pipelines) are created through this class.
+    """
+
+    def __init__(self, logger: Optional[Logger] = None) -> None: ...
 
     @overload
     def create_buffer(
@@ -376,11 +359,7 @@ class Renderer:
         """
         ...
 
-    def create_command_buffer(self) -> CommandBuffer:
-        """Allocate a new command buffer."""
-        ...
-
-    def create_pipeline(self) -> PipelineBuilder:
+    def pipeline_builder(self) -> PipelineBuilder:
         """Create a new pipeline builder."""
         ...
 
@@ -401,6 +380,35 @@ class Renderer:
         self, max_sets: int, samplers: int = 0, uniform_buffers: int = 0, storage_buffers: int = 0
     ) -> DescriptorPool:
         """Create a descriptor pool for allocating descriptor sets."""
+        ...
+
+# ── SwapchainRenderer ──────────────────────────────────────────────────
+
+class SwapchainRenderer:
+    """Manages a Vulkan swapchain, synchronization, and frame presentation.
+
+    Requires a ``Context`` for GPU access and a window (or HWND) as the render target.
+    """
+
+    @overload
+    def __init__(self, window: Window, context: Context) -> None: ...
+    @overload
+    def __init__(self, win32_hwnd: int, context: Context) -> None: ...
+    def __init__(self, *args, **kwargs) -> None: ...
+
+    def begin_frame(self) -> bool:
+        """Acquire the next swapchain image.
+
+        Returns ``True`` if successful, or ``False`` if the frame should be skipped (e.g. window minimized).
+        """
+        ...
+
+    def submit(self, cmd: CommandBuffer) -> None:
+        """Submit a recorded command buffer for the current frame to the presentation queue."""
+        ...
+
+    def create_command_buffer(self) -> CommandBuffer:
+        """Allocate a new command buffer."""
         ...
 
 # ── Keyboard Constants ─────────────────────────────────────────────────
