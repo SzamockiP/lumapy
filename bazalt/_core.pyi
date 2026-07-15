@@ -44,6 +44,11 @@ class FrontFace(IntEnum):
     CLOCKWISE: int
     COUNTER_CLOCKWISE: int
 
+class MemoryUsage(IntEnum):
+    """Memory usage strategy for buffer creation."""
+    STATIC: int
+    DYNAMIC: int
+
 # ── Data Classes ───────────────────────────────────────────────────────
 
 class MouseState:
@@ -342,20 +347,20 @@ class Context:
 
     @overload
     def create_buffer(
-        self, list: list, type: BufferType, data_type: Optional[DataType] = None
+        self, list: list, type: BufferType, usage: MemoryUsage, data_type: Optional[DataType] = None
     ) -> Buffer: ...
     @overload
-    def create_buffer(self, array: buffer, type: BufferType) -> Buffer: ...
+    def create_buffer(self, array: buffer, type: BufferType, usage: MemoryUsage) -> Buffer: ...
     @overload
-    def create_buffer(self, size_in_bytes: int, type: BufferType) -> Buffer: ...
+    def create_buffer(self, size_in_bytes: int, type: BufferType, usage: MemoryUsage) -> Buffer: ...
     def create_buffer(self, *args, **kwargs) -> Buffer:
         """Create a GPU buffer.
 
         Three overloads:
 
-        1. ``create_buffer(list, type, data_type=None)`` — from a Python list
-        2. ``create_buffer(array, type)`` — from a numpy array (buffer protocol)
-        3. ``create_buffer(size_in_bytes, type)`` — empty buffer of given size
+        1. ``create_buffer(list, type, usage, data_type=None)`` — from a Python list
+        2. ``create_buffer(array, type, usage)`` — from a numpy array (buffer protocol)
+        3. ``create_buffer(size_in_bytes, type, usage)`` — empty buffer of given size
         """
         ...
 

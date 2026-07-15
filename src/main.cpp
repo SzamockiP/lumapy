@@ -88,6 +88,11 @@ PYBIND11_MODULE(_core, m) {
         .value("COUNTER_CLOCKWISE", FrontFace::COUNTER_CLOCKWISE)
         .export_values();
 
+    py::enum_<MemoryUsage>(m, "MemoryUsage")
+        .value("STATIC", MemoryUsage::STATIC)
+        .value("DYNAMIC", MemoryUsage::DYNAMIC)
+        .export_values();
+
     py::class_<MouseState>(m, "MouseState")
         .def_readonly("dx", &MouseState::dx)
         .def_readonly("dy", &MouseState::dy);
@@ -195,10 +200,10 @@ PYBIND11_MODULE(_core, m) {
         .def("end_rendering", &CommandBuffer::endRendering)
         .def("set_viewport", &CommandBuffer::setViewport)
         .def("set_scissor", &CommandBuffer::setScissor)
-        .def("bind_pipeline", &CommandBuffer::bindPipeline)
-        .def("bind_vertex_buffer", &CommandBuffer::bindVertexBuffer)
-        .def("bind_index_buffer", &CommandBuffer::bindIndexBuffer)
-        .def("draw", &CommandBuffer::draw)
+        .def("bind_pipeline", &CommandBuffer::bindPipeline, py::arg("pipeline"))
+        .def("bind_vertex_buffer", &CommandBuffer::bindVertexBuffer, py::arg("buffer"))
+        .def("bind_index_buffer", &CommandBuffer::bindIndexBuffer, py::arg("buffer"))
+        .def("draw", &CommandBuffer::draw, py::arg("vertex_count"))
         .def("draw_indexed", &CommandBuffer::drawIndexed,
              py::arg("index_count"), py::arg("first_index") = 0, py::arg("vertex_offset") = 0)
         .def("draw_indexed_instanced", &CommandBuffer::drawIndexedInstanced,
@@ -206,7 +211,7 @@ PYBIND11_MODULE(_core, m) {
              py::arg("first_index") = 0, py::arg("vertex_offset") = 0)
         .def("push_constants", [](CommandBuffer& cmd, std::shared_ptr<Pipeline> pipeline, ShaderStage stage, uint32_t offset, std::string_view data) {
             cmd.pushConstants(pipeline, stage, offset, static_cast<uint32_t>(data.size()), data.data());
-        })
+        }, py::arg("pipeline"), py::arg("stage"), py::arg("offset"), py::arg("data"))
         .def("bind_descriptor_set", &CommandBuffer::bindDescriptorSet,
              py::arg("descriptor_set"), py::arg("pipeline"), py::arg("set"));
 
@@ -222,11 +227,11 @@ PYBIND11_MODULE(_core, m) {
         .def("is_open", &Window::is_open)
         .def("should_close", &Window::should_close)
         .def("poll_events", &Window::poll_events)
-        .def("is_key_pressed", &Window::is_key_pressed)
-        .def("is_mouse_button_pressed", &Window::is_mouse_button_pressed)
-        .def("set_cursor_mode", &Window::set_cursor_mode)
+        .def("is_key_pressed", &Window::is_key_pressed, py::arg("key"))
+        .def("is_mouse_button_pressed", &Window::is_mouse_button_pressed, py::arg("button"))
+        .def("set_cursor_mode", &Window::set_cursor_mode, py::arg("mode"))
         .def("get_mouse_state", &Window::get_mouse_state)
-        .def("set_title", &Window::set_title)
+        .def("set_title", &Window::set_title, py::arg("title"))
         .def_property_readonly("width", &Window::get_width)
         .def_property_readonly("height", &Window::get_height);
 
@@ -248,7 +253,7 @@ PYBIND11_MODULE(_core, m) {
             }
             return std::move(res.value());
         }), py::arg("logger") = py::none())
-        .def("create_buffer", [](Context& self, py::list list, BufferType type, std::optional<DataType> dataType) -> py::object {
+        .def("create_buffer", [](Context& self, py::list list, BufferType type, MemoryUsage usage, std::optional<DataType> dataType) -> py::object {
             if (list.empty()) {
                 throw std::runtime_error("Cannot create buffer from empty list");
             }
@@ -273,19 +278,19 @@ PYBIND11_MODULE(_core, m) {
             if (actualType == DataType::FLOAT) {
                 std::vector<float> data(count);
                 for(size_t i=0; i<count; ++i) data[i] = list[i].cast<float>();
-                res = Buffer::create(self, data.data(), count * sizeof(float), type);
+                res = Buffer::create(self, data.data(), count * sizeof(float), type, usage);
             } else if (actualType == DataType::UINT32) {
                 std::vector<uint32_t> data(count);
                 for(size_t i=0; i<count; ++i) data[i] = list[i].cast<uint32_t>();
-                res = Buffer::create(self, data.data(), count * sizeof(uint32_t), type);
+                res = Buffer::create(self, data.data(), count * sizeof(uint32_t), type, usage);
             } else if (actualType == DataType::UINT16) {
                 std::vector<uint16_t> data(count);
                 for(size_t i=0; i<count; ++i) data[i] = list[i].cast<uint16_t>();
-                res = Buffer::create(self, data.data(), count * sizeof(uint16_t), type);
+                res = Buffer::create(self, data.data(), count * sizeof(uint16_t), type, usage);
             } else if (actualType == DataType::INT32) {
                 std::vector<int32_t> data(count);
                 for(size_t i=0; i<count; ++i) data[i] = list[i].cast<int32_t>();
-                res = Buffer::create(self, data.data(), count * sizeof(int32_t), type);
+                res = Buffer::create(self, data.data(), count * sizeof(int32_t), type, usage);
             }
 
             if (res) {
@@ -294,26 +299,26 @@ PYBIND11_MODULE(_core, m) {
                 if (auto l = self.logger()) l->log(res.error());
                 throw std::runtime_error(res.error());
             }
-        }, py::arg("list"), py::arg("type"), py::arg("data_type") = py::none())
-        .def("create_buffer", [](Context& self, py::buffer b, BufferType type) -> py::object {
+        }, py::arg("list"), py::arg("type"), py::arg("usage"), py::arg("data_type") = py::none())
+        .def("create_buffer", [](Context& self, py::buffer b, BufferType type, MemoryUsage usage) -> py::object {
             py::buffer_info info = b.request();
-            auto res = Buffer::create(self, info.ptr, info.size * info.itemsize, type);
+            auto res = Buffer::create(self, info.ptr, info.size * info.itemsize, type, usage);
             if (res) {
                 return py::cast(res.value());
             } else {
                 if (auto l = self.logger()) l->log(res.error());
                 throw std::runtime_error(res.error());
             }
-        }, py::arg("array"), py::arg("type"))
-        .def("create_buffer", [](Context& self, size_t size_in_bytes, BufferType type) -> py::object {
-            auto res = Buffer::create(self, nullptr, size_in_bytes, type);
+        }, py::arg("array"), py::arg("type"), py::arg("usage"))
+        .def("create_buffer", [](Context& self, size_t size_in_bytes, BufferType type, MemoryUsage usage) -> py::object {
+            auto res = Buffer::create(self, nullptr, size_in_bytes, type, usage);
             if (res) {
                 return py::cast(res.value());
             } else {
                 if (auto l = self.logger()) l->log(res.error());
                 throw std::runtime_error(res.error());
             }
-        }, py::arg("size_in_bytes"), py::arg("type"))
+        }, py::arg("size_in_bytes"), py::arg("type"), py::arg("usage"))
         .def("pipeline_builder", [](Context& self) -> std::shared_ptr<PipelineBuilder> {
             return std::make_shared<PipelineBuilder>(self);
         })
@@ -325,7 +330,7 @@ PYBIND11_MODULE(_core, m) {
                 if (auto l = self.logger()) l->log(res.error());
                 throw std::runtime_error(res.error());
             }
-        })
+        }, py::arg("path"), py::arg("stage"))
         .def("load_texture", [](Context& self, const std::string& path) -> py::object {
             auto res = Texture::create(self, path);
             if (res) {
@@ -334,7 +339,7 @@ PYBIND11_MODULE(_core, m) {
                 if (auto l = self.logger()) l->log(res.error());
                 throw std::runtime_error(res.error());
             }
-        })
+        }, py::arg("path"))
         .def("create_descriptor_pool", [](Context& self, uint32_t maxSets, uint32_t samplers, uint32_t uniformBuffers, uint32_t storageBuffers) -> py::object {
             auto res = DescriptorPool::create(self, maxSets, samplers, uniformBuffers, storageBuffers);
             if (res) {
@@ -414,7 +419,7 @@ PYBIND11_MODULE(_core, m) {
 #endif
         }), py::arg("win32_hwnd"), py::arg("context"))
         .def("begin_frame", &SwapchainRenderer::begin_frame)
-        .def("submit", &SwapchainRenderer::submit)
+        .def("submit", &SwapchainRenderer::submit, py::arg("cmd"))
         .def("create_command_buffer", [](SwapchainRenderer& self) -> py::object {
             auto res = CommandBuffer::create(self);
             if (res) {

@@ -32,10 +32,10 @@ vertices = [
      0.5,  0.5,  1.0, 1.0,
     -0.5,  0.5,  0.0, 1.0,
 ]
-vbuf = ctx.create_buffer(vertices, bz.BufferType.VERTEX, bz.DataType.FLOAT)
+vbuf = ctx.create_buffer(vertices, bz.BufferType.VERTEX, bz.MemoryUsage.STATIC, bz.DataType.FLOAT)
 
 indices = [0, 1, 2, 2, 3, 0]
-ibuf = ctx.create_buffer(indices, bz.BufferType.INDEX, bz.DataType.UINT32)
+ibuf = ctx.create_buffer(indices, bz.BufferType.INDEX, bz.MemoryUsage.STATIC, bz.DataType.UINT32)
 
 # Descriptors
 pool = ctx.create_descriptor_pool(max_sets=1, samplers=1)

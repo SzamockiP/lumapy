@@ -63,10 +63,10 @@ if __name__ == "__main__":
     ]
     
     # Create Vertex Buffer through the Context
-    vbuf = ctx.create_buffer(vertices, bz.BufferType.VERTEX, bz.DataType.FLOAT)
+    vbuf = ctx.create_buffer(vertices, bz.BufferType.VERTEX, bz.MemoryUsage.STATIC, bz.DataType.FLOAT)
     
     # Create Index Buffer through the Context
-    ibuf = ctx.create_buffer([0, 1, 2], bz.BufferType.INDEX, bz.DataType.UINT32)
+    ibuf = ctx.create_buffer([0, 1, 2], bz.BufferType.INDEX, bz.MemoryUsage.STATIC, bz.DataType.UINT32)
 
     # Command buffers store a sequence of commands for the GPU.
     # For a static triangle, we can record this buffer once during initialization 

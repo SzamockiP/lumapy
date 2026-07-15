@@ -23,6 +23,11 @@ enum class DataType {
     INT32
 };
 
+enum class MemoryUsage {
+    STATIC,
+    DYNAMIC
+};
+
 class Buffer {
 public:
     virtual ~Buffer() = default;
@@ -36,7 +41,7 @@ public:
         throw std::runtime_error("Update not supported for this buffer type");
     }
 
-    static std::expected<std::shared_ptr<Buffer>, std::string> create(Context& context, const void* data, size_t data_size, BufferType type);
+    static std::expected<std::shared_ptr<Buffer>, std::string> create(Context& context, const void* data, size_t data_size, BufferType type, MemoryUsage usage);
 };
 
 class StaticBuffer : public Buffer {
@@ -243,6 +248,9 @@ public:
 
         for (size_t i = 0; i < Context::MAX_FRAMES_IN_FLIGHT; ++i) {
             if (vmaCreateBuffer(context.allocator(), &bufferInfo, &allocInfo, &buffers[i], &allocations[i], nullptr) != VK_SUCCESS) {
+                for (size_t j = 0; j < i; ++j) {
+                    vmaDestroyBuffer(context.allocator(), buffers[j], allocations[j]);
+                }
                 return std::unexpected(std::string("Failed to create ") + (type == BufferType::STORAGE ? "storage" : "uniform") + " buffer");
             }
 
@@ -267,8 +275,8 @@ private:
 // Keep backward-compatible alias
 using UniformBuffer = DynamicBuffer;
 
-inline std::expected<std::shared_ptr<Buffer>, std::string> Buffer::create(Context& context, const void* data, size_t data_size, BufferType type) {
-    if (type == BufferType::UNIFORM || type == BufferType::STORAGE) {
+inline std::expected<std::shared_ptr<Buffer>, std::string> Buffer::create(Context& context, const void* data, size_t data_size, BufferType type, MemoryUsage usage) {
+    if (usage == MemoryUsage::DYNAMIC) {
         return DynamicBuffer::create(context, data, data_size, type);
     } else {
         return StaticBuffer::create(context, data, data_size, type);

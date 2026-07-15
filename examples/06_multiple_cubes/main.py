@@ -100,20 +100,20 @@ vertices = [
      0.5, -0.5,  0.5,   0.0, -1.0,  0.0,   1.0, 0.0, 1.0,
     -0.5, -0.5,  0.5,   0.0, -1.0,  0.0,   1.0, 0.0, 1.0,
 ]
-vbuf = ctx.create_buffer(vertices, bz.BufferType.VERTEX)
+vbuf = ctx.create_buffer(vertices, bz.BufferType.VERTEX, bz.MemoryUsage.STATIC)
 
 indices = []
 for i in range(6):
     indices.extend([i*4+0, i*4+1, i*4+2, i*4+2, i*4+3, i*4+0])
 
-ibuf = ctx.create_buffer(indices, bz.BufferType.INDEX)
+ibuf = ctx.create_buffer(indices, bz.BufferType.INDEX, bz.MemoryUsage.STATIC)
 
 ubo_size_bytes = (
     glm.sizeof(glm.mat4) * 2 +  
     glm.sizeof(glm.mat4) * 11 + 
     glm.sizeof(glm.vec4) * 3    
 )
-ubuf = ctx.create_buffer(ubo_size_bytes, bz.BufferType.UNIFORM)
+ubuf = ctx.create_buffer(ubo_size_bytes, bz.BufferType.UNIFORM, bz.MemoryUsage.DYNAMIC)
 
 # Descriptors
 pool = ctx.create_descriptor_pool(max_sets=2, uniform_buffers=2)

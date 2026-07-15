@@ -50,9 +50,9 @@ class VulkanWidget(QWidget):
             -0.5,  0.5, 0.0,   0.0, 1.0, 0.0, # Bottom-Left / Green
              0.5,  0.5, 0.0,   0.0, 0.0, 1.0, # Bottom-Right / Blue
         ]
-        self.vbuf = self.ctx.create_buffer(vertices, bz.BufferType.VERTEX, bz.DataType.FLOAT)
+        self.vbuf = self.ctx.create_buffer(vertices, bz.BufferType.VERTEX, bz.MemoryUsage.STATIC, bz.DataType.FLOAT)
         
-        self.ibuf = self.ctx.create_buffer([0, 1, 2], bz.BufferType.INDEX, bz.DataType.UINT32)
+        self.ibuf = self.ctx.create_buffer([0, 1, 2], bz.BufferType.INDEX, bz.MemoryUsage.STATIC, bz.DataType.UINT32)
         
         # Record commands
         self.cmd = self.renderer.create_command_buffer()

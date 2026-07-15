@@ -7,6 +7,8 @@
 #include <memory>
 #include <expected>
 
+#include <atomic>
+
 #include "SurfaceProvider.hpp"
 
 struct WindowDeleter
@@ -32,11 +34,17 @@ struct MouseState
 class Window
 {
 public:
+    static inline std::atomic<int> window_count_{0};
+
     static std::expected<std::unique_ptr<Window>, std::string> create(int width, int height, const std::string& title)
     {
-        if (!glfwInit())
+        if (window_count_.fetch_add(1) == 0)
         {
-            return std::unexpected("Failed to initialize GLFW");
+            if (!glfwInit())
+            {
+                window_count_.fetch_sub(1);
+                return std::unexpected("Failed to initialize GLFW");
+            }
         }
 
         glfwWindowHint(GLFW_CLIENT_API, GLFW_NO_API);
@@ -45,7 +53,10 @@ public:
         GLFWwindow* raw_window = glfwCreateWindow(width, height, title.c_str(), nullptr, nullptr);
         if (!raw_window)
         {
-            glfwTerminate();
+            if (window_count_.fetch_sub(1) == 1)
+            {
+                glfwTerminate();
+            }
             return std::unexpected("Failed to create window");
         }
 
@@ -63,7 +74,10 @@ public:
 
     ~Window()
     {
-        glfwTerminate();
+        if (window_count_.fetch_sub(1) == 1)
+        {
+            glfwTerminate();
+        }
     };
 
     Window(const Window&) = delete;

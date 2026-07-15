@@ -21,6 +21,7 @@ from bazalt._core import (  # noqa: F401 — explicit re-exports for IDE visibil
     Format,
     CullMode,
     FrontFace,
+    MemoryUsage,
 )
 
 __version__ = "0.3.0"
@@ -48,6 +49,7 @@ __all__ = [
     "Format",
     "CullMode",
     "FrontFace",
+    "MemoryUsage",
     # Version
     "__version__",
 ]
