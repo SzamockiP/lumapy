@@ -243,6 +243,20 @@ PYBIND11_MODULE(_core, m) {
             return std::string("<LogMessage ") + severity_name(msg.severity) + " '" + msg.text + "'>";
         });
 
+    // Capabilities, not versions/extensions: the same capability has different
+    // spellings per driver (dynamic rendering is an extension on 1.2, core in
+    // 1.3), so which one to use is bazalt's problem, not the user's. New entries
+    // here are additive, so nothing about this needs to wait for a 2.0.
+    py::enum_<Feature>(m, "Feature")
+        .value("ANISOTROPIC_FILTERING", Feature::ANISOTROPIC_FILTERING)
+        .value("WIREFRAME", Feature::WIREFRAME)
+        .value("WIDE_LINES", Feature::WIDE_LINES)
+        .value("DEPTH_CLAMP", Feature::DEPTH_CLAMP)
+        .value("SAMPLE_RATE_SHADING", Feature::SAMPLE_RATE_SHADING)
+        .value("MULTI_DRAW_INDIRECT", Feature::MULTI_DRAW_INDIRECT)
+        .value("SHADER_FLOAT64", Feature::SHADER_FLOAT64)
+        .export_values();
+
     py::enum_<BufferType>(m, "BufferType")
         .value("VERTEX", BufferType::VERTEX)
         .value("INDEX", BufferType::INDEX)
@@ -435,19 +449,35 @@ PYBIND11_MODULE(_core, m) {
 
     // ── Context ──
     py::class_<Context, std::shared_ptr<Context>>(m, "Context")
-        .def(py::init([](std::shared_ptr<Logger> logger, const std::string& validation) {
-            ValidationMode mode = parse_validation(validation);
+        .def(py::init([](std::shared_ptr<Logger> logger, const std::string& validation,
+                         std::vector<Feature> features, std::vector<Feature> optional,
+                         std::vector<std::string> raw_extensions) {
+            ContextConfig config;
+            config.validation = parse_validation(validation);
+            config.required = std::move(features);
+            config.optional = std::move(optional);
+            config.raw_extensions = std::move(raw_extensions);
+
             if (!logger) {
                 logger = make_default_logger();
             }
-            auto res = Context::create(logger, mode);
+            auto res = Context::create(logger, config);
             if (!res) {
                 logger->log(res.error());
                 raise_error(res.error());
             }
             return std::move(res.value());
-        }), py::arg("logger") = py::none(), py::arg("validation") = "auto")
+        }), py::arg("logger") = py::none(), py::arg("validation") = "auto",
+            py::arg("features") = std::vector<Feature>{},
+            py::arg("optional") = std::vector<Feature>{},
+            py::arg("raw_extensions") = std::vector<std::string>{})
         .def_property_readonly("logger", &Context::logger)
+        .def("supports", &Context::supports, py::arg("feature"))
+        .def_property_readonly("device_name", &Context::device_name)
+        .def_property_readonly("api_version", [](const Context& self) {
+            return api_version_string(self.api_version());
+        })
+        .def_property_readonly("headless", &Context::headless)
         .def("create_buffer", [](Context& self, py::list list, BufferType type, MemoryUsage usage, std::optional<DataType> dataType) -> py::object {
             if (list.empty()) {
                 raise_error(err_resource("Cannot create buffer from empty list"));

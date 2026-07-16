@@ -223,8 +223,11 @@ public:
             .addressModeV = VK_SAMPLER_ADDRESS_MODE_REPEAT,
             .addressModeW = VK_SAMPLER_ADDRESS_MODE_REPEAT,
             .mipLodBias = 0.0f,
-            .anisotropyEnable = VK_TRUE,
-            .maxAnisotropy = 16.0f,
+            // Conditional: samplerAnisotropy used to be a hard device requirement,
+            // so a GPU without it couldn't run bazalt at all rather than just
+            // rendering slightly softer textures.
+            .anisotropyEnable = context.supports(Feature::ANISOTROPIC_FILTERING) ? VK_TRUE : VK_FALSE,
+            .maxAnisotropy = context.supports(Feature::ANISOTROPIC_FILTERING) ? 16.0f : 1.0f,
             .compareEnable = VK_FALSE,
             .compareOp = VK_COMPARE_OP_ALWAYS,
             .minLod = 0.0f,

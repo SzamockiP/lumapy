@@ -97,7 +97,13 @@ public:
 
         shaderc::Compiler compiler;
         shaderc::CompileOptions options;
-        options.SetTargetEnvironment(shaderc_target_env_vulkan, shaderc_env_version_vulkan_1_3);
+        // Follow the negotiated device version rather than assuming 1.3: SPIR-V
+        // targeted at 1.3 can be rejected by a 1.2 driver.
+        shaderc_env_version env_version =
+            VK_API_VERSION_MINOR(context.api_version()) >= 3
+                ? shaderc_env_version_vulkan_1_3
+                : shaderc_env_version_vulkan_1_2;
+        options.SetTargetEnvironment(shaderc_target_env_vulkan, env_version);
         options.SetOptimizationLevel(shaderc_optimization_level_performance);
 
         shaderc_shader_kind kind = to_shaderc_kind(stage);
