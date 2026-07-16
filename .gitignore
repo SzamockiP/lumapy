@@ -6,6 +6,9 @@ examples/assets/San_Miguel/
 
 CMakeSettings.json
 
+# Working roadmap — local planning notes, not part of the published package
+ROADMAP.md
+
 # Python
 __pycache__/
 *.egg-info/

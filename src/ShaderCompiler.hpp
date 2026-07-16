@@ -8,13 +8,35 @@
 #include <memory>
 #include <expected>
 #include <print>
+#include <cctype>
 
 #include "Context.hpp"
+#include "Error.hpp"
 
 enum class ShaderStage {
     VERTEX,
     FRAGMENT
 };
+
+// A real switch, deliberately with no default case: adding COMPUTE later makes
+// every conversion site a compiler error instead of silently aliasing the new
+// stage onto FRAGMENT, which is what the old `stage == VERTEX ? ... : ...`
+// ternaries scattered across Pipeline.hpp and CommandBuffer.hpp would have done.
+inline VkShaderStageFlagBits to_vk(ShaderStage stage) {
+    switch (stage) {
+        case ShaderStage::VERTEX:   return VK_SHADER_STAGE_VERTEX_BIT;
+        case ShaderStage::FRAGMENT: return VK_SHADER_STAGE_FRAGMENT_BIT;
+    }
+    return VK_SHADER_STAGE_VERTEX_BIT;  // unreachable; silences -Wreturn-type
+}
+
+inline shaderc_shader_kind to_shaderc_kind(ShaderStage stage) {
+    switch (stage) {
+        case ShaderStage::VERTEX:   return shaderc_glsl_vertex_shader;
+        case ShaderStage::FRAGMENT: return shaderc_glsl_fragment_shader;
+    }
+    return shaderc_glsl_vertex_shader;
+}
 
 class ShaderModule {
 public:
@@ -59,10 +81,10 @@ private:
 
 class ShaderCompiler {
 public:
-    static std::expected<std::shared_ptr<ShaderModule>, std::string> compile(Context& context, const std::string& source_path, ShaderStage stage) {
+    static std::expected<std::shared_ptr<ShaderModule>, Error> compile(Context& context, const std::string& source_path, ShaderStage stage) {
         std::ifstream file(source_path, std::ios::ate | std::ios::binary);
         if (!file.is_open()) {
-            return std::unexpected("Failed to open shader file: " + source_path);
+            return std::unexpected(err_resource("Failed to open shader file: " + source_path));
         }
 
         size_t fileSize = (size_t)file.tellg();
@@ -78,12 +100,14 @@ public:
         options.SetTargetEnvironment(shaderc_target_env_vulkan, shaderc_env_version_vulkan_1_3);
         options.SetOptimizationLevel(shaderc_optimization_level_performance);
 
-        shaderc_shader_kind kind = stage == ShaderStage::VERTEX ? shaderc_glsl_vertex_shader : shaderc_glsl_fragment_shader;
-        
+        shaderc_shader_kind kind = to_shaderc_kind(stage);
+
         shaderc::SpvCompilationResult module = compiler.CompileGlslToSpv(source, kind, source_path.c_str(), options);
 
         if (module.GetCompilationStatus() != shaderc_compilation_status_success) {
-            return std::unexpected("Shader compilation failed: " + module.GetErrorMessage());
+            std::string log = module.GetErrorMessage();
+            return std::unexpected(err_shader("Shader compilation failed: " + log,
+                                              source_path, parse_error_line(log)));
         }
 
         std::vector<uint32_t> spirv(module.cbegin(), module.cend());
@@ -97,10 +121,37 @@ public:
         };
 
         VkShaderModule vk_module;
-        if (vkCreateShaderModule(context.device(), &createInfo, nullptr, &vk_module) != VK_SUCCESS) {
-            return std::unexpected("Failed to create shader module");
+        if (auto e = check(vkCreateShaderModule(context.device(), &createInfo, nullptr, &vk_module),
+                           "create shader module", ErrorCode::Shader)) {
+            return std::unexpected(*e);
         }
 
         return std::make_shared<ShaderModule>(context.shared_from_this(), vk_module, source_path);
+    }
+
+private:
+    // shaderc formats diagnostics as "<name>:<line>: error: ...", so the first
+    // ":<digits>:" is the line. Returns -1 when the message doesn't match, which
+    // is honest — better than guessing a wrong line number.
+    static int parse_error_line(const std::string& log) {
+        for (std::size_t i = 0; i + 1 < log.size(); ++i) {
+            if (log[i] != ':') {
+                continue;
+            }
+
+            std::size_t j = i + 1;
+            while (j < log.size() && std::isdigit(static_cast<unsigned char>(log[j]))) {
+                ++j;
+            }
+
+            if (j > i + 1 && j < log.size() && log[j] == ':') {
+                try {
+                    return std::stoi(log.substr(i + 1, j - i - 1));
+                } catch (const std::exception&) {
+                    return -1;
+                }
+            }
+        }
+        return -1;
     }
 };

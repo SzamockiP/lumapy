@@ -7,18 +7,32 @@
 #include <memory>
 #include <string>
 
+#include "Error.hpp"
 #include "Logger.hpp"
+
+// How hard to try to turn on the validation layers.
+//
+// Auto is the default and never fails: end-user machines generally have no
+// layers installed, and a missing layer is not a reason to refuse to render.
+enum class ValidationMode
+{
+	Off,
+	Auto,
+	On,
+};
 
 class Context : public std::enable_shared_from_this<Context>
 {
 public:
 	static constexpr int MAX_FRAMES_IN_FLIGHT = 2;
 
-	static std::expected<std::shared_ptr<Context>, std::string> create(std::shared_ptr<Logger> logger)
+	static std::expected<std::shared_ptr<Context>, Error> create(
+		std::shared_ptr<Logger> logger,
+		ValidationMode validation = ValidationMode::Auto)
 	{
-		if (volkInitialize() != VK_SUCCESS)
+		if (auto e = check(volkInitialize(), "initialize volk"))
 		{
-			return std::unexpected("Vulkan: Failed to initialize volk");
+			return std::unexpected(*e);
 		}
 
 		auto context = std::shared_ptr<Context>(new Context(logger));
@@ -29,9 +43,22 @@ public:
 			.set_app_version(1, 0, 0)
 			.require_api_version(1, 3, 0);
 
-		if (logger)
+		// Validation is independent of whether a logger was supplied. It used to
+		// be gated on `logger != nullptr`, which meant the default path rendered
+		// with the layers off and stayed silent about its own bugs.
+		if (validation != ValidationMode::Off)
 		{
-			inst_builder.request_validation_layers()
+			if (validation == ValidationMode::On)
+			{
+				inst_builder.enable_validation_layers();
+			}
+			else
+			{
+				// Enables the layers only if they are actually present.
+				inst_builder.request_validation_layers();
+			}
+
+			inst_builder
 				.set_debug_callback(debug_callback)
 				.set_debug_callback_user_data_pointer(logger.get())
 				.set_debug_messenger_severity(
@@ -55,7 +82,7 @@ public:
 
 		if (!inst_ret)
 		{
-			return std::unexpected("Vulkan: " + inst_ret.error().message());
+			return std::unexpected(err_init("Vulkan: " + inst_ret.error().message()));
 		}
 		context->vkb_instance_ = inst_ret.value();
 		volkLoadInstance(context->vkb_instance_.instance);
@@ -76,7 +103,7 @@ public:
 
 		if (!phys_ret)
 		{
-			return std::unexpected("Vulkan: " + phys_ret.error().message());
+			return std::unexpected(err_init("Vulkan: " + phys_ret.error().message()));
 		}
 		context->vkb_physical_device_ = phys_ret.value();
 
@@ -94,7 +121,7 @@ public:
 
 		if (!dev_ret)
 		{
-			return std::unexpected("Vulkan: " + dev_ret.error().message());
+			return std::unexpected(err_init("Vulkan: " + dev_ret.error().message()));
 		}
 		context->vkb_device_ = dev_ret.value();
 		volkLoadDevice(context->vkb_device_.device);
@@ -102,7 +129,7 @@ public:
 		auto gq = context->vkb_device_.get_queue(vkb::QueueType::graphics);
 		if (!gq)
 		{
-			return std::unexpected("Vulkan: Failed to get graphics queue");
+			return std::unexpected(err_init("Vulkan: Failed to get graphics queue"));
 		}
 		context->graphics_queue_ = gq.value();
 		context->graphics_queue_family_ =
@@ -120,9 +147,10 @@ public:
 		allocatorInfo.pVulkanFunctions = &vulkanFunctions;
 		allocatorInfo.vulkanApiVersion = VK_API_VERSION_1_3;
 
-		if (vmaCreateAllocator(&allocatorInfo, &context->allocator_) != VK_SUCCESS)
+		if (auto e = check(vmaCreateAllocator(&allocatorInfo, &context->allocator_),
+		                   "create VMA allocator"))
 		{
-			return std::unexpected("Vulkan: Failed to create VMA allocator");
+			return std::unexpected(*e);
 		}
 
 		// Command Pool
@@ -133,14 +161,16 @@ public:
 			.queueFamilyIndex = context->graphics_queue_family_
 		};
 
-		if (vkCreateCommandPool(context->vkb_device_.device, &poolInfo, nullptr, &context->command_pool_) != VK_SUCCESS)
+		if (auto e = check(vkCreateCommandPool(context->vkb_device_.device, &poolInfo,
+		                                       nullptr, &context->command_pool_),
+		                   "create command pool"))
 		{
-			return std::unexpected("Vulkan: Failed to create command pool");
+			return std::unexpected(*e);
 		}
 
 		if (logger)
 		{
-			logger->log("Vulkan: Initialized (" +
+			logger->log(Severity::Info, Source::General, "Vulkan: Initialized (" +
 				std::string(context->vkb_physical_device_.properties.deviceName) + ")");
 		}
 
@@ -200,17 +230,20 @@ private:
 		Logger* logger = static_cast<Logger*>(user_data);
 		if (logger)
 		{
-			std::string prefix = "[Vulkan Validation] ";
+			// The severity travels as data. It used to be glued onto the front of
+			// the text as "ERROR: ", which is why the callback named on_error was
+			// receiving warnings and info messages indistinguishably.
+			Severity severity = Severity::Info;
 			if (message_severity & VK_DEBUG_UTILS_MESSAGE_SEVERITY_ERROR_BIT_EXT)
 			{
-				prefix += "ERROR: ";
+				severity = Severity::Error;
 			}
 			else if (message_severity & VK_DEBUG_UTILS_MESSAGE_SEVERITY_WARNING_BIT_EXT)
 			{
-				prefix += "WARNING: ";
+				severity = Severity::Warning;
 			}
 
-			logger->log(prefix + callback_data->pMessage);
+			logger->log(severity, Source::Validation, callback_data->pMessage);
 		}
 		return VK_FALSE;
 	}

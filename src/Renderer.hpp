@@ -78,7 +78,7 @@ inline VkExtent2D choose_swap_extent(const VkSurfaceCapabilitiesKHR& capabilitie
 class SwapchainRenderer
 {
 public:
-	static std::expected<std::unique_ptr<SwapchainRenderer>, std::string> create(std::shared_ptr<Context> context, SurfaceProvider surface_provider)
+	static std::expected<std::unique_ptr<SwapchainRenderer>, Error> create(std::shared_ptr<Context> context, SurfaceProvider surface_provider)
 	{
 		auto renderer = std::unique_ptr<SwapchainRenderer>(new SwapchainRenderer(context, std::move(surface_provider)));
 
@@ -86,7 +86,9 @@ public:
 		VkSurfaceKHR surface = renderer->surface_provider_.create_surface(context->instance());
 		if (surface == VK_NULL_HANDLE)
 		{
-			return std::unexpected("Vulkan: Failed to create window surface");
+			// Window rather than Initialization: this fails when the window/HWND is
+			// unusable, which the caller can fix without rebuilding the Context.
+			return std::unexpected(err_window("Vulkan: Failed to create window surface"));
 		}
 		renderer->surface_ = surface;
 
@@ -100,14 +102,14 @@ public:
 		);
 		if (!presentSupport)
 		{
-			return std::unexpected("Vulkan: Graphics queue does not support present to this surface");
+			return std::unexpected(err_init("Vulkan: Graphics queue does not support present to this surface"));
 		}
 		renderer->present_queue_ = context->graphics_queue();
 
 		// Swapchain
 		auto [width, height] = renderer->surface_provider_.get_framebuffer_size();
 		if (!renderer->create_swapchain_manually(width, height)) {
-			return std::unexpected("Vulkan: Failed to create swapchain");
+			return std::unexpected(err_init("Vulkan: Failed to create swapchain"));
 		}
 
 		// Sync Objects
@@ -125,19 +127,25 @@ public:
 
 		for (size_t i = 0; i < Context::MAX_FRAMES_IN_FLIGHT; i++)
 		{
-			if (vkCreateSemaphore(context->device(), &semaphoreInfo, nullptr, &renderer->image_available_semaphores_[i]) != VK_SUCCESS ||
-				vkCreateFence(context->device(), &fenceInfo, nullptr, &renderer->in_flight_fences_[i]) != VK_SUCCESS)
+			if (auto e = check(vkCreateSemaphore(context->device(), &semaphoreInfo, nullptr, &renderer->image_available_semaphores_[i]),
+			                   "create image available semaphore"))
 			{
-				return std::unexpected("Vulkan: Failed to create CPU synchronization objects");
+				return std::unexpected(*e);
+			}
+			if (auto e = check(vkCreateFence(context->device(), &fenceInfo, nullptr, &renderer->in_flight_fences_[i]),
+			                   "create in flight fence"))
+			{
+				return std::unexpected(*e);
 			}
 		}
 
 		renderer->render_finished_semaphores_.resize(renderer->swapchain_images_.size());
 		for (size_t i = 0; i < renderer->swapchain_images_.size(); i++)
 		{
-			if (vkCreateSemaphore(context->device(), &semaphoreInfo, nullptr, &renderer->render_finished_semaphores_[i]) != VK_SUCCESS)
+			if (auto e = check(vkCreateSemaphore(context->device(), &semaphoreInfo, nullptr, &renderer->render_finished_semaphores_[i]),
+			                   "create render finished semaphore"))
 			{
-				return std::unexpected("Vulkan: Failed to create render finished semaphores");
+				return std::unexpected(*e);
 			}
 		}
 
@@ -166,9 +174,10 @@ public:
 		VmaAllocationCreateInfo allocImageInfo = {};
 		allocImageInfo.usage = VMA_MEMORY_USAGE_AUTO;
 
-		if (vmaCreateImage(context->allocator(), &imageInfo, &allocImageInfo, &renderer->depth_image_, &renderer->depth_image_allocation_, nullptr) != VK_SUCCESS)
+		if (auto e = check(vmaCreateImage(context->allocator(), &imageInfo, &allocImageInfo, &renderer->depth_image_, &renderer->depth_image_allocation_, nullptr),
+		                   "create depth image"))
 		{
-			return std::unexpected("Vulkan: Failed to create depth image");
+			return std::unexpected(*e);
 		}
 
 		VkImageViewCreateInfo viewInfo{
@@ -191,9 +200,10 @@ public:
 			}
 		};
 
-		if (vkCreateImageView(context->device(), &viewInfo, nullptr, &renderer->depth_image_view_) != VK_SUCCESS)
+		if (auto e = check(vkCreateImageView(context->device(), &viewInfo, nullptr, &renderer->depth_image_view_),
+		                   "create depth image view"))
 		{
-			return std::unexpected("Vulkan: Failed to create depth image view");
+			return std::unexpected(*e);
 		}
 
 		return renderer;
@@ -287,7 +297,7 @@ public:
 			frame_skipped_ = true;
 			return false;
 		} else if (result != VK_SUCCESS && result != VK_SUBOPTIMAL_KHR) {
-			if (auto l = context_->logger()) l->log("Failed to acquire swapchain image!");
+			if (auto l = context_->logger()) l->log(Severity::Error, Source::Device, "Failed to acquire swapchain image!");
 			frame_skipped_ = true;
 			return false;
 		}
@@ -316,7 +326,7 @@ public:
 		};
 
 		if (vkQueueSubmit(context_->graphics_queue(), 1, &submitInfo, in_flight_fences_[current_frame()]) != VK_SUCCESS) {
-			if (auto l = context_->logger()) l->log("Failed to submit draw command buffer!");
+			if (auto l = context_->logger()) l->log(Severity::Error, Source::Device, "Failed to submit draw command buffer!");
 		}
 
 		VkPresentInfoKHR presentInfo{
@@ -492,7 +502,7 @@ private:
 		VkSwapchainKHR old_swapchain = swapchain_;
 		auto [width, height] = surface_provider_.get_framebuffer_size();
 		if (!create_swapchain_manually(width, height, old_swapchain)) {
-			if (auto l = context_->logger()) l->log("Failed to recreate swapchain manually!");
+			if (auto l = context_->logger()) l->log(Severity::Error, Source::Device, "Failed to recreate swapchain manually!");
 			return;
 		}
 
@@ -509,7 +519,7 @@ private:
 		render_finished_semaphores_.resize(swapchain_images_.size());
 		for (size_t i = 0; i < swapchain_images_.size(); i++) {
 			if (vkCreateSemaphore(context_->device(), &semaphoreInfo, nullptr, &render_finished_semaphores_[i]) != VK_SUCCESS) {
-				if (auto l = context_->logger()) l->log("Failed to recreate render finished semaphores");
+				if (auto l = context_->logger()) l->log(Severity::Error, Source::Device, "Failed to recreate render finished semaphores");
 				return;
 			}
 		}
@@ -537,7 +547,7 @@ private:
 		allocImageInfo.usage = VMA_MEMORY_USAGE_AUTO;
 
 		if (vmaCreateImage(context_->allocator(), &imageInfo, &allocImageInfo, &depth_image_, &depth_image_allocation_, nullptr) != VK_SUCCESS) {
-			if (auto l = context_->logger()) l->log("Failed to recreate depth image");
+			if (auto l = context_->logger()) l->log(Severity::Error, Source::Device, "Failed to recreate depth image");
 			return;
 		}
 
@@ -562,10 +572,10 @@ private:
 		};
 
 		if (vkCreateImageView(context_->device(), &viewInfo, nullptr, &depth_image_view_) != VK_SUCCESS) {
-			if (auto l = context_->logger()) l->log("Failed to recreate depth image view");
+			if (auto l = context_->logger()) l->log(Severity::Error, Source::Device, "Failed to recreate depth image view");
 			return;
 		}
 
-		if (auto l = context_->logger()) l->log("Swapchain recreated (" + std::to_string(swapchain_extent_.width) + "x" + std::to_string(swapchain_extent_.height) + ")");
+		if (auto l = context_->logger()) l->log(Severity::Info, Source::Device, "Swapchain recreated (" + std::to_string(swapchain_extent_.width) + "x" + std::to_string(swapchain_extent_.height) + ")");
 	}
 };

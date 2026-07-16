@@ -162,7 +162,7 @@ public:
 
     PipelineBuilder& pushConstant(uint32_t size, ShaderStage stage) {
         VkPushConstantRange range{
-            .stageFlags = static_cast<VkShaderStageFlags>((stage == ShaderStage::VERTEX) ? VK_SHADER_STAGE_VERTEX_BIT : VK_SHADER_STAGE_FRAGMENT_BIT),
+            .stageFlags = static_cast<VkShaderStageFlags>(to_vk(stage)),
             .offset = 0,
             .size = size
         };
@@ -183,9 +183,9 @@ public:
     }
 
     // Build the pipeline with explicit color/depth formats (decoupled from renderer)
-    std::expected<std::shared_ptr<Pipeline>, std::string> build(VkFormat colorFormat, VkFormat depthFormat) {
+    std::expected<std::shared_ptr<Pipeline>, Error> build(VkFormat colorFormat, VkFormat depthFormat) {
         if (!vertex_shader_ || !fragment_shader_) {
-            return std::unexpected("Vertex and fragment shaders must be provided");
+            return std::unexpected(err_shader("Vertex and fragment shaders must be provided"));
         }
 
         std::vector<VkPipelineShaderStageCreateInfo> shaderStages;
@@ -235,12 +235,13 @@ public:
                     };
 
                     VkDescriptorSetLayout layout;
-                    if (vkCreateDescriptorSetLayout(context_.device(), &layoutInfo, nullptr, &layout) != VK_SUCCESS) {
+                    if (auto e = check(vkCreateDescriptorSetLayout(context_.device(), &layoutInfo, nullptr, &layout),
+                                       "create descriptor set layout for set " + std::to_string(s))) {
                         // Cleanup already created layouts
                         for (auto dl : descriptorSetLayouts) {
                             vkDestroyDescriptorSetLayout(context_.device(), dl, nullptr);
                         }
-                        return std::unexpected("Failed to create descriptor set layout for set " + std::to_string(s));
+                        return std::unexpected(*e);
                     }
                     descriptorSetLayouts.push_back(layout);
 
@@ -261,11 +262,12 @@ public:
                     };
 
                     VkDescriptorSetLayout layout;
-                    if (vkCreateDescriptorSetLayout(context_.device(), &layoutInfo, nullptr, &layout) != VK_SUCCESS) {
+                    if (auto e = check(vkCreateDescriptorSetLayout(context_.device(), &layoutInfo, nullptr, &layout),
+                                       "create empty descriptor set layout for set " + std::to_string(s))) {
                         for (auto dl : descriptorSetLayouts) {
                             vkDestroyDescriptorSetLayout(context_.device(), dl, nullptr);
                         }
-                        return std::unexpected("Failed to create empty descriptor set layout for set " + std::to_string(s));
+                        return std::unexpected(*e);
                     }
                     descriptorSetLayouts.push_back(layout);
                 }
@@ -429,11 +431,12 @@ public:
         };
 
         VkPipelineLayout pipelineLayout;
-        if (vkCreatePipelineLayout(context_.device(), &pipelineLayoutInfo, nullptr, &pipelineLayout) != VK_SUCCESS) {
+        if (auto e = check(vkCreatePipelineLayout(context_.device(), &pipelineLayoutInfo, nullptr, &pipelineLayout),
+                           "create pipeline layout")) {
             for (auto dl : descriptorSetLayouts) {
                 vkDestroyDescriptorSetLayout(context_.device(), dl, nullptr);
             }
-            return std::unexpected("Failed to create pipeline layout!");
+            return std::unexpected(*e);
         }
 
         // Dynamic Rendering Info
@@ -470,12 +473,16 @@ public:
         };
 
         VkPipeline graphicsPipeline;
-        if (vkCreateGraphicsPipelines(context_.device(), VK_NULL_HANDLE, 1, &pipelineInfo, nullptr, &graphicsPipeline) != VK_SUCCESS) {
+        // ErrorCode::Shader, not Initialization: a pipeline that fails to build is
+        // almost always a shader/state mismatch the caller can fix and retry, and
+        // hot reload (0.6) depends on catching exactly this as recoverable.
+        if (auto e = check(vkCreateGraphicsPipelines(context_.device(), VK_NULL_HANDLE, 1, &pipelineInfo, nullptr, &graphicsPipeline),
+                           "create graphics pipeline", ErrorCode::Shader)) {
             vkDestroyPipelineLayout(context_.device(), pipelineLayout, nullptr);
             for (auto dl : descriptorSetLayouts) {
                 vkDestroyDescriptorSetLayout(context_.device(), dl, nullptr);
             }
-            return std::unexpected("Failed to create graphics pipeline!");
+            return std::unexpected(*e);
         }
 
         return std::make_shared<Pipeline>(context_.shared_from_this(), graphicsPipeline, pipelineLayout,
@@ -484,7 +491,7 @@ public:
 
 private:
     PipelineBuilder& addDescriptorBinding_(uint32_t binding, ShaderStage stage, VkDescriptorType descriptorType, uint32_t setIndex) {
-        VkShaderStageFlags stageFlag = (stage == ShaderStage::VERTEX) ? VK_SHADER_STAGE_VERTEX_BIT : VK_SHADER_STAGE_FRAGMENT_BIT;
+        VkShaderStageFlags stageFlag = static_cast<VkShaderStageFlags>(to_vk(stage));
         
         auto& bindings = descriptor_bindings_[setIndex];
         

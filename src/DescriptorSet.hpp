@@ -110,7 +110,7 @@ private:
 
 class DescriptorPool {
 public:
-    static std::expected<std::shared_ptr<DescriptorPool>, std::string> create(
+    static std::expected<std::shared_ptr<DescriptorPool>, Error> create(
         Context& context,
         uint32_t maxSets,
         uint32_t samplerCount,
@@ -139,7 +139,7 @@ public:
         }
 
         if (poolSizes.empty()) {
-            return std::unexpected("DescriptorPool must have at least one non-zero descriptor count");
+            return std::unexpected(err_resource("DescriptorPool must have at least one non-zero descriptor count"));
         }
 
         VkDescriptorPoolCreateInfo poolInfo{
@@ -152,8 +152,9 @@ public:
         };
 
         VkDescriptorPool pool;
-        if (vkCreateDescriptorPool(context.device(), &poolInfo, nullptr, &pool) != VK_SUCCESS) {
-            return std::unexpected("Failed to create descriptor pool");
+        if (auto e = check(vkCreateDescriptorPool(context.device(), &poolInfo, nullptr, &pool),
+                           "create descriptor pool", ErrorCode::Resource)) {
+            return std::unexpected(*e);
         }
 
         return std::shared_ptr<DescriptorPool>(new DescriptorPool(context.shared_from_this(), pool));
@@ -169,13 +170,13 @@ public:
     DescriptorPool& operator=(const DescriptorPool&) = delete;
 
     // Allocate a static descriptor set (1 VkDescriptorSet)
-    std::expected<std::shared_ptr<DescriptorSet>, std::string>
+    std::expected<std::shared_ptr<DescriptorSet>, Error>
     allocateDescriptorSet(std::shared_ptr<Pipeline> pipeline, uint32_t setIndex) {
-        if (!context_) return std::unexpected("Context destroyed");
+        if (!context_) return std::unexpected(err_init("Context destroyed"));
 
         VkDescriptorSetLayout layout = pipeline->descriptor_set_layout(setIndex);
         if (layout == VK_NULL_HANDLE) {
-            return std::unexpected("Pipeline has no descriptor set layout at set index " + std::to_string(setIndex));
+            return std::unexpected(err_resource("Pipeline has no descriptor set layout at set index " + std::to_string(setIndex)));
         }
 
         VkDescriptorSetAllocateInfo allocInfo{
@@ -187,8 +188,9 @@ public:
         };
 
         VkDescriptorSet set;
-        if (vkAllocateDescriptorSets(context_->device(), &allocInfo, &set) != VK_SUCCESS) {
-            return std::unexpected("Failed to allocate descriptor set from pool (pool may be full)");
+        if (auto e = check(vkAllocateDescriptorSets(context_->device(), &allocInfo, &set),
+                           "allocate descriptor set from pool (pool may be full)", ErrorCode::Resource)) {
+            return std::unexpected(*e);
         }
 
         return std::make_shared<DescriptorSet>(
@@ -197,13 +199,13 @@ public:
     }
 
     // Allocate a frame descriptor set (MAX_FRAMES_IN_FLIGHT VkDescriptorSets)
-    std::expected<std::shared_ptr<DescriptorSet>, std::string>
+    std::expected<std::shared_ptr<DescriptorSet>, Error>
     allocateFrameDescriptorSet(std::shared_ptr<Pipeline> pipeline, uint32_t setIndex) {
-        if (!context_) return std::unexpected("Context destroyed");
+        if (!context_) return std::unexpected(err_init("Context destroyed"));
 
         VkDescriptorSetLayout layout = pipeline->descriptor_set_layout(setIndex);
         if (layout == VK_NULL_HANDLE) {
-            return std::unexpected("Pipeline has no descriptor set layout at set index " + std::to_string(setIndex));
+            return std::unexpected(err_resource("Pipeline has no descriptor set layout at set index " + std::to_string(setIndex)));
         }
 
         std::vector<VkDescriptorSetLayout> layouts(Context::MAX_FRAMES_IN_FLIGHT, layout);
@@ -216,13 +218,18 @@ public:
         };
 
         std::vector<VkDescriptorSet> sets(Context::MAX_FRAMES_IN_FLIGHT);
-        if (vkAllocateDescriptorSets(context_->device(), &allocInfo, sets.data()) != VK_SUCCESS) {
-            return std::unexpected("Failed to allocate frame descriptor sets from pool (pool may be full)");
+        if (auto e = check(vkAllocateDescriptorSets(context_->device(), &allocInfo, sets.data()),
+                           "allocate frame descriptor sets from pool (pool may be full)", ErrorCode::Resource)) {
+            return std::unexpected(*e);
         }
 
         return std::make_shared<DescriptorSet>(
             context_, std::move(sets),
             pipeline->binding_types(setIndex), true);
+    }
+
+    std::shared_ptr<Logger> logger() const {
+        return context_ ? context_->logger() : nullptr;
     }
 
 private:

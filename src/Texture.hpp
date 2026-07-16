@@ -38,12 +38,16 @@ public:
     int width() const { return width_; }
     int height() const { return height_; }
 
-    static std::expected<std::shared_ptr<Texture>, std::string> create(Context& context, const std::string& path) {
+    static std::expected<std::shared_ptr<Texture>, Error> create(Context& context, const std::string& path) {
         // Load image from disk
         int width, height, channels;
         stbi_uc* pixels = stbi_load(path.c_str(), &width, &height, &channels, STBI_rgb_alpha);
         if (!pixels) {
-            return std::unexpected("Failed to load texture: " + path);
+            // stb knows whether this was a missing file or a corrupt one; saying
+            // only "Failed to load" throws that away.
+            const char* reason = stbi_failure_reason();
+            return std::unexpected(err_resource("Failed to load texture: " + path +
+                                                (reason ? std::string(" (") + reason + ")" : "")));
         }
 
         VkDeviceSize imageSize = static_cast<VkDeviceSize>(width) * height * 4;
@@ -67,9 +71,10 @@ public:
         VkBuffer stagingBuffer;
         VmaAllocation stagingAllocation;
 
-        if (vmaCreateBuffer(context.allocator(), &stagingInfo, &stagingAllocInfo, &stagingBuffer, &stagingAllocation, nullptr) != VK_SUCCESS) {
+        if (auto e = check(vmaCreateBuffer(context.allocator(), &stagingInfo, &stagingAllocInfo, &stagingBuffer, &stagingAllocation, nullptr),
+                           "create staging buffer for texture", ErrorCode::Resource)) {
             stbi_image_free(pixels);
-            return std::unexpected("Failed to create staging buffer for texture");
+            return std::unexpected(*e);
         }
 
         void* mappedData;
@@ -103,9 +108,10 @@ public:
 
         VkImage image;
         VmaAllocation allocation;
-        if (vmaCreateImage(context.allocator(), &imageCreateInfo, &imageAllocInfo, &image, &allocation, nullptr) != VK_SUCCESS) {
+        if (auto e = check(vmaCreateImage(context.allocator(), &imageCreateInfo, &imageAllocInfo, &image, &allocation, nullptr),
+                           "create texture image", ErrorCode::Resource)) {
             vmaDestroyBuffer(context.allocator(), stagingBuffer, stagingAllocation);
-            return std::unexpected("Failed to create texture image");
+            return std::unexpected(*e);
         }
 
         // Record layout transitions + copy in a one-shot command buffer
@@ -199,9 +205,10 @@ public:
         };
 
         VkImageView imageView;
-        if (vkCreateImageView(context.device(), &viewInfo, nullptr, &imageView) != VK_SUCCESS) {
+        if (auto e = check(vkCreateImageView(context.device(), &viewInfo, nullptr, &imageView),
+                           "create texture image view", ErrorCode::Resource)) {
             vmaDestroyImage(context.allocator(), image, allocation);
-            return std::unexpected("Failed to create texture image view");
+            return std::unexpected(*e);
         }
 
         // Create Sampler
@@ -227,10 +234,11 @@ public:
         };
 
         VkSampler sampler;
-        if (vkCreateSampler(context.device(), &samplerInfo, nullptr, &sampler) != VK_SUCCESS) {
+        if (auto e = check(vkCreateSampler(context.device(), &samplerInfo, nullptr, &sampler),
+                           "create texture sampler", ErrorCode::Resource)) {
             vkDestroyImageView(context.device(), imageView, nullptr);
             vmaDestroyImage(context.allocator(), image, allocation);
-            return std::unexpected("Failed to create texture sampler");
+            return std::unexpected(*e);
         }
 
         return std::make_shared<Texture>(context.shared_from_this(), image, allocation, imageView, sampler, width, height);

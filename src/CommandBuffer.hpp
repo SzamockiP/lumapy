@@ -13,10 +13,10 @@
 
 class CommandBuffer {
 public:
-    static std::expected<std::shared_ptr<CommandBuffer>, std::string> create(SwapchainRenderer& renderer) {
+    static std::expected<std::shared_ptr<CommandBuffer>, Error> create(SwapchainRenderer& renderer) {
         auto ctx = renderer.context();
         auto cmd = std::shared_ptr<CommandBuffer>(new CommandBuffer(ctx));
-        
+
         VkCommandBufferAllocateInfo allocInfo{
             .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
             .pNext = nullptr,
@@ -25,10 +25,11 @@ public:
             .commandBufferCount = Context::MAX_FRAMES_IN_FLIGHT
         };
 
-        if (vkAllocateCommandBuffers(ctx->device(), &allocInfo, cmd->command_buffers_.data()) != VK_SUCCESS) {
-            return std::unexpected("Failed to allocate command buffers!");
+        if (auto e = check(vkAllocateCommandBuffers(ctx->device(), &allocInfo, cmd->command_buffers_.data()),
+                           "allocate command buffers", ErrorCode::Resource)) {
+            return std::unexpected(*e);
         }
-        
+
         return cmd;
     }
 
@@ -252,7 +253,7 @@ public:
     void pushConstants(std::shared_ptr<Pipeline> pipeline, ShaderStage stage, uint32_t offset, uint32_t size, const void* data) {
         std::vector<uint8_t> buffer(static_cast<const uint8_t*>(data), static_cast<const uint8_t*>(data) + size);
         commands_.push_back([pipeline, stage, offset, size, buffer](VkCommandBuffer cmd, SwapchainRenderer& renderer) {
-            VkShaderStageFlags stageFlags = (stage == ShaderStage::VERTEX) ? VK_SHADER_STAGE_VERTEX_BIT : VK_SHADER_STAGE_FRAGMENT_BIT;
+            VkShaderStageFlags stageFlags = static_cast<VkShaderStageFlags>(to_vk(stage));
             vkCmdPushConstants(cmd, pipeline->layout(), stageFlags, offset, size, buffer.data());
         });
     }

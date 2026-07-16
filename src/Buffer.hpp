@@ -41,7 +41,7 @@ public:
         throw std::runtime_error("Update not supported for this buffer type");
     }
 
-    static std::expected<std::shared_ptr<Buffer>, std::string> create(Context& context, const void* data, size_t data_size, BufferType type, MemoryUsage usage);
+    static std::expected<std::shared_ptr<Buffer>, Error> create(Context& context, const void* data, size_t data_size, BufferType type, MemoryUsage usage);
 };
 
 class StaticBuffer : public Buffer {
@@ -61,7 +61,7 @@ public:
     VkBuffer get() const override { return buffer_; }
     size_t size() const override { return size_; }
 
-    static std::expected<std::shared_ptr<StaticBuffer>, std::string> create(Context& context, const void* data, size_t data_size, BufferType type) {
+    static std::expected<std::shared_ptr<StaticBuffer>, Error> create(Context& context, const void* data, size_t data_size, BufferType type) {
         VkBufferUsageFlags usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT;
         switch (type) {
             case BufferType::VERTEX: usage |= VK_BUFFER_USAGE_VERTEX_BUFFER_BIT; break;
@@ -89,8 +89,9 @@ public:
         VmaAllocation stagingAllocation;
         VmaAllocationInfo stagingAllocInfoOut;
 
-        if (vmaCreateBuffer(context.allocator(), &stagingInfo, &stagingAllocInfo, &stagingBuffer, &stagingAllocation, &stagingAllocInfoOut) != VK_SUCCESS) {
-            return std::unexpected("Failed to create staging buffer");
+        if (auto e = check(vmaCreateBuffer(context.allocator(), &stagingInfo, &stagingAllocInfo, &stagingBuffer, &stagingAllocation, &stagingAllocInfoOut),
+                           "create staging buffer", ErrorCode::Resource)) {
+            return std::unexpected(*e);
         }
 
         if (data != nullptr && data_size > 0) {
@@ -116,9 +117,10 @@ public:
 
         VkBuffer buffer;
         VmaAllocation allocation;
-        if (vmaCreateBuffer(context.allocator(), &bufferInfo, &allocInfo, &buffer, &allocation, nullptr) != VK_SUCCESS) {
+        if (auto e = check(vmaCreateBuffer(context.allocator(), &bufferInfo, &allocInfo, &buffer, &allocation, nullptr),
+                           "create device local buffer", ErrorCode::Resource)) {
             vmaDestroyBuffer(context.allocator(), stagingBuffer, stagingAllocation);
-            return std::unexpected("Failed to create device local buffer");
+            return std::unexpected(*e);
         }
 
         VkCommandBufferAllocateInfo allocCmdInfo{
@@ -223,7 +225,7 @@ public:
         }
     }
 
-    static std::expected<std::shared_ptr<DynamicBuffer>, std::string> create(Context& context, const void* data, size_t data_size, BufferType type) {
+    static std::expected<std::shared_ptr<DynamicBuffer>, Error> create(Context& context, const void* data, size_t data_size, BufferType type) {
         VkBufferUsageFlags usage = (type == BufferType::STORAGE) 
             ? VK_BUFFER_USAGE_STORAGE_BUFFER_BIT 
             : VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT;
@@ -247,11 +249,13 @@ public:
         std::array<VmaAllocation, Context::MAX_FRAMES_IN_FLIGHT> allocations{};
 
         for (size_t i = 0; i < Context::MAX_FRAMES_IN_FLIGHT; ++i) {
-            if (vmaCreateBuffer(context.allocator(), &bufferInfo, &allocInfo, &buffers[i], &allocations[i], nullptr) != VK_SUCCESS) {
+            if (auto e = check(vmaCreateBuffer(context.allocator(), &bufferInfo, &allocInfo, &buffers[i], &allocations[i], nullptr),
+                               std::string("create ") + (type == BufferType::STORAGE ? "storage" : "uniform") + " buffer",
+                               ErrorCode::Resource)) {
                 for (size_t j = 0; j < i; ++j) {
                     vmaDestroyBuffer(context.allocator(), buffers[j], allocations[j]);
                 }
-                return std::unexpected(std::string("Failed to create ") + (type == BufferType::STORAGE ? "storage" : "uniform") + " buffer");
+                return std::unexpected(*e);
             }
 
             if (data != nullptr && data_size > 0) {
@@ -275,7 +279,7 @@ private:
 // Keep backward-compatible alias
 using UniformBuffer = DynamicBuffer;
 
-inline std::expected<std::shared_ptr<Buffer>, std::string> Buffer::create(Context& context, const void* data, size_t data_size, BufferType type, MemoryUsage usage) {
+inline std::expected<std::shared_ptr<Buffer>, Error> Buffer::create(Context& context, const void* data, size_t data_size, BufferType type, MemoryUsage usage) {
     if (usage == MemoryUsage::DYNAMIC) {
         return DynamicBuffer::create(context, data, data_size, type);
     } else {

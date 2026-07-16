@@ -6,9 +6,12 @@
 #include <stdexcept>
 #include <memory>
 #include <expected>
+#include <utility>
 
 #include <atomic>
 
+#include "Error.hpp"
+#include "Logger.hpp"
 #include "SurfaceProvider.hpp"
 
 struct WindowDeleter
@@ -36,14 +39,22 @@ class Window
 public:
     static inline std::atomic<int> window_count_{0};
 
-    static std::expected<std::unique_ptr<Window>, std::string> create(int width, int height, const std::string& title)
+    static std::expected<std::unique_ptr<Window>, Error> create(int width, int height,
+                                                                const std::string& title,
+                                                                std::shared_ptr<Logger> logger = nullptr)
     {
+        // Must be installed before glfwInit — otherwise the most common failure a
+        // new user hits (no display, no drivers) reports "Failed to create window"
+        // and throws away the one string that says why.
+        glfwSetErrorCallback(glfw_error_callback);
+        glfw_logger_ = logger;
+
         if (window_count_.fetch_add(1) == 0)
         {
             if (!glfwInit())
             {
                 window_count_.fetch_sub(1);
-                return std::unexpected("Failed to initialize GLFW");
+                return std::unexpected(err_window(describe_glfw_failure("Failed to initialize GLFW")));
             }
         }
 
@@ -57,11 +68,12 @@ public:
             {
                 glfwTerminate();
             }
-            return std::unexpected("Failed to create window");
+            return std::unexpected(err_window(describe_glfw_failure("Failed to create window")));
         }
 
         auto window = std::unique_ptr<Window>(new Window(width, height, title));
         window->window_.reset(raw_window);
+        window->logger_ = std::move(logger);
 
         glfwSetWindowUserPointer(window->window_.get(), window.get());
         glfwSetCursorPosCallback(window->window_.get(), mouse_callback);
@@ -187,7 +199,39 @@ private:
     Window(int width, int height, const std::string& title) :
         width_(width), height_(height), title_(title) {}
 
+    // GLFW's error callback is global rather than per-window, so the routing has
+    // to be global too. weak_ptr so this never keeps a Logger alive.
+    static inline std::weak_ptr<Logger> glfw_logger_;
+    static inline std::string last_glfw_error_;
+
+    static void glfw_error_callback(int error_code, const char* description)
+    {
+        last_glfw_error_ = description
+            ? std::string(description)
+            : ("GLFW error " + std::to_string(error_code));
+
+        if (auto logger = glfw_logger_.lock())
+        {
+            logger->log(Severity::Error, Source::Window, last_glfw_error_);
+        }
+    }
+
+    // Consumes the recorded text, so an unrelated later failure cannot inherit a
+    // stale diagnostic.
+    static std::string describe_glfw_failure(std::string_view what)
+    {
+        std::string detail = std::move(last_glfw_error_);
+        last_glfw_error_.clear();
+
+        if (detail.empty())
+        {
+            return std::string(what);
+        }
+        return std::string(what) + ": " + detail;
+    }
+
     std::unique_ptr<GLFWwindow, WindowDeleter> window_;
+    std::shared_ptr<Logger> logger_;
     int width_;
     int height_;
     std::string title_;
