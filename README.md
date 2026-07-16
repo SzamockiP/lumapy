@@ -17,7 +17,46 @@ pip install bazalt
 - **Automatic Shader Compilation:** Compile GLSL shaders (Vertex/Fragment) directly from your code.
 - **Pipeline & Buffer Management:** Easy builder pattern for graphics pipelines and unified buffer creation.
 - **Command Buffers:** Explicit, yet simple command recording for drawing operations.
-- **Decoupled Architecture:** Clean separation of concerns between Windowing (GLFW), Vulkan Context (GPU initialization), and Surface Presenting (SwapchainRenderer).
+- **Headless Rendering:** Draw into an offscreen `RenderTarget` and read the pixels back as a NumPy array — no window, no display required.
+- **Runs Widely:** Vulkan 1.2 baseline with 1.3 used where available, so bazalt runs on older integrated GPUs too. Capabilities are requested by name, never by version or extension.
+- **Decoupled Architecture:** Clean separation of concerns between Windowing (GLFW), Vulkan Context (GPU initialization), and render targets — a window is one target among others.
+
+## Quick Start: Rendering Without a Window
+
+Everything below works with no display attached, which makes it usable from CI
+and tests:
+
+```python
+import bazalt as bz
+
+ctx = bz.Context()
+target = bz.RenderTarget(ctx, 800, 600, depth=True)
+
+pipeline = (ctx.pipeline_builder()
+    .vertex_shader(ctx.compile_shader("triangle.vert", bz.ShaderStage.VERTEX))
+    .fragment_shader(ctx.compile_shader("triangle.frag", bz.ShaderStage.FRAGMENT))
+    .vertex_format([bz.VertexFormat.FLOAT3, bz.VertexFormat.FLOAT3])
+    .build(target))
+
+# Interleaved position (x,y,z) and color (r,g,b)
+vbuf = ctx.create_buffer([
+     0.0, -0.5, 0.0,   1.0, 0.0, 0.0,
+    -0.5,  0.5, 0.0,   0.0, 1.0, 0.0,
+     0.5,  0.5, 0.0,   0.0, 0.0, 1.0,
+], bz.BufferType.VERTEX, bz.MemoryUsage.STATIC, bz.DataType.FLOAT)
+
+cmd = ctx.create_command_buffer()
+cmd.begin()
+cmd.begin_rendering(target, clear_color=[0.1, 0.2, 0.3, 1.0])
+cmd.bind_pipeline(pipeline)
+cmd.bind_vertex_buffer(vbuf)
+cmd.draw(3)
+cmd.end_rendering(target)
+
+ctx.submit(cmd)
+
+pixels = target.read_pixels()   # numpy (600, 800, 4) uint8
+```
 
 ## Quick Start: Drawing a Triangle
 
@@ -26,14 +65,17 @@ Here is a minimal example demonstrating how to initialize the window, Vulkan Con
 ```python
 import bazalt as bz
 
-# 1. Initialize Logger and register a callback
-logger = bz.Logger()
-@logger.on_error
-def error(msg):
-    print(f"Error: {msg}")
+# 1. Initialize Logger and register a callback.
+#    Each message carries its severity and source as data, so you can filter
+#    without parsing strings. This is optional: a Context created without one
+#    reports warnings on stderr by default.
+logger = bz.Logger(min_severity=bz.Severity.WARNING)
+@logger.on_message
+def on_message(msg):
+    print(f"[{msg.severity}] {msg.text}")
 
 # 2. Create the window, Vulkan Context, and SwapchainRenderer
-window = bz.Window(1024, 720, "Bazalt Demo - Triangle")
+window = bz.Window(1024, 720, "Bazalt Demo - Triangle", logger=logger)
 ctx = bz.Context(logger)
 renderer = bz.SwapchainRenderer(window, ctx)
 
@@ -45,12 +87,12 @@ if __name__ == "__main__":
     frag_spv = ctx.compile_shader("triangle.frag", bz.ShaderStage.FRAGMENT)
 
     # The pipeline is a baked state object that tells the GPU how to interpret our data.
-    # It is built via the Context's pipeline_builder and compiled against the renderer
-    # to inherit compatible color/depth format options.
+    # It is built against a render target, which supplies the color/depth formats.
+    # A SwapchainRenderer is one, so is an offscreen RenderTarget — same call.
     pipeline = (ctx.pipeline_builder()
         .vertex_shader(vert_spv)
         .fragment_shader(frag_spv)
-        .vertex_format([bz.Format.FLOAT3, bz.Format.FLOAT3]) # Position + Color
+        .vertex_format([bz.VertexFormat.FLOAT3, bz.VertexFormat.FLOAT3]) # Position + Color
         .build(renderer))
 
     # We interleave Position (x,y,z) and Color (r,g,b) in a single flat array.
@@ -71,24 +113,23 @@ if __name__ == "__main__":
     # Command buffers store a sequence of commands for the GPU.
     # For a static triangle, we can record this buffer once during initialization 
     # and submit the same pre-recorded buffer every frame to save CPU time.
-    cmd = renderer.create_command_buffer()
-    
+    cmd = ctx.create_command_buffer()
+
     cmd.begin()
-    
-    # begin_rendering starts a render pass, automatically handling framebuffers
-    # and clearing the screen to the specified color before drawing.
-    cmd.begin_rendering(clear_color=[0.1, 0.2, 0.3, 1.0])
-    cmd.set_viewport()
-    cmd.set_scissor()
-    
+
+    # begin_rendering names the target you are drawing into, clears it, and sets
+    # a viewport and scissor covering it. Naming the target is what lets the same
+    # code render to a window or to an offscreen image.
+    cmd.begin_rendering(renderer, clear_color=[0.1, 0.2, 0.3, 1.0])
+
     # Bind the baked pipeline and the geometry buffers
     cmd.bind_pipeline(pipeline)
     cmd.bind_vertex_buffer(vbuf)
     cmd.bind_index_buffer(ibuf)
-    
+
     # Draw 3 indices (1 triangle)
     cmd.draw_indexed(3)
-    cmd.end_rendering()
+    cmd.end_rendering(renderer)
 
     # Main game/rendering loop
     while window.is_open():

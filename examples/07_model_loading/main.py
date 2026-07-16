@@ -72,9 +72,9 @@ def load_materials(mtl_path):
 class DemoApp:
     def __init__(self):
         # Create window, logger and renderer
-        self.window = bz.Window(1024, 720, "Bazalt Demo - Model Loader")
         self.logger = bz.Logger()
-        self.logger.on_error(self.on_error)
+        self.logger.on_message(self.on_message)
+        self.window = bz.Window(1024, 720, "Bazalt Demo - Model Loader", logger=self.logger)
         self.ctx = bz.Context(self.logger)
         self.renderer = bz.SwapchainRenderer(self.window, self.ctx)
         self.window.set_cursor_mode(bz.CURSOR_DISABLED)
@@ -94,8 +94,8 @@ class DemoApp:
         self.setup_descriptors()
         self.record_commands()
 
-    def on_error(self, msg):
-        print(f"[Renderer Error]: {msg}")
+    def on_message(self, msg):
+        print(f"[{msg.severity}] {msg.text}")
 
     def setup_pipeline(self, script_dir):
         # Compile GLSL shaders
@@ -106,7 +106,7 @@ class DemoApp:
         self.pipeline = (self.ctx.pipeline_builder()
             .vertex_shader(vert_spv)
             .fragment_shader(frag_spv)
-            .vertex_format([bz.Format.FLOAT3, bz.Format.FLOAT3, bz.Format.FLOAT2, bz.Format.FLOAT3])
+            .vertex_format([bz.VertexFormat.FLOAT3, bz.VertexFormat.FLOAT3, bz.VertexFormat.FLOAT2, bz.VertexFormat.FLOAT3])
             .depth_test(True)
             .cull_mode(bz.CullMode.BACK, bz.FrontFace.COUNTER_CLOCKWISE)
             .uniform_buffer(0, bz.ShaderStage.VERTEX, set=0)
@@ -216,11 +216,9 @@ class DemoApp:
 
     def record_commands(self):
         # Create and record a command buffer
-        self.cmd = self.renderer.create_command_buffer()
+        self.cmd = self.ctx.create_command_buffer()
         self.cmd.begin()
-        self.cmd.begin_rendering(clear_color=[0.1, 0.2, 0.3, 1.0])
-        self.cmd.set_viewport()
-        self.cmd.set_scissor()
+        self.cmd.begin_rendering(self.renderer, clear_color=[0.1, 0.2, 0.3, 1.0])
         self.cmd.bind_pipeline(self.pipeline)
         self.cmd.bind_descriptor_set(self.frame_set, self.pipeline, set=0)
         
@@ -231,7 +229,7 @@ class DemoApp:
             self.cmd.bind_descriptor_set(self.texture_sets[dc['texture']], self.pipeline, set=1)
             self.cmd.draw_indexed(dc['index_count'], first_index=dc['first_index'], vertex_offset=dc['vertex_offset'])
             
-        self.cmd.end_rendering()
+        self.cmd.end_rendering(self.renderer)
 
     def run(self):
         print("Rendering started")

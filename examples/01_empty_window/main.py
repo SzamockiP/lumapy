@@ -3,19 +3,19 @@ import time
 
 # Create window, logger, and renderer
 logger = bz.Logger()
-@logger.on_error
-def error(msg):
-    print(msg)
+@logger.on_message
+def on_message(msg):
+    print(f"[{msg.severity}] {msg.text}")
 
-window = bz.Window(1024, 720, "Bazalt Demo - Empty")
+window = bz.Window(1024, 720, "Bazalt Demo - Empty", logger=logger)
 ctx = bz.Context(logger)
 renderer = bz.SwapchainRenderer(window, ctx)
 
 # Record command buffer once
-cmd = renderer.create_command_buffer()
+cmd = ctx.create_command_buffer()
 cmd.begin()
-cmd.begin_rendering(clear_color=[0.1, 0.1, 0.1, 1.0])
-cmd.end_rendering()
+cmd.begin_rendering(renderer, clear_color=[0.1, 0.1, 0.1, 1.0])
+cmd.end_rendering(renderer)
 
 # Main loop
 last_time = time.time()

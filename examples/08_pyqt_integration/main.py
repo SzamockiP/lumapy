@@ -12,9 +12,9 @@ class VulkanWidget(QWidget):
         
         # 1. Initialize Bazalt Logger and register callbacks
         self.logger = bz.Logger()
-        @self.logger.on_error
-        def on_err(msg):
-            print(f"[Vulkan Error]: {msg}")
+        @self.logger.on_message
+        def on_message(msg):
+            print(f"[{msg.severity}] {msg.text}")
 
         # 2. Initialize Bazalt Context and SwapchainRenderer (connected directly to native Win32 window handle)
         self.ctx = bz.Context(self.logger)
@@ -41,7 +41,7 @@ class VulkanWidget(QWidget):
         self.pipeline = (self.ctx.pipeline_builder()
             .vertex_shader(vert_spv)
             .fragment_shader(frag_spv)
-            .vertex_format([bz.Format.FLOAT3, bz.Format.FLOAT3])
+            .vertex_format([bz.VertexFormat.FLOAT3, bz.VertexFormat.FLOAT3])
             .build(self.renderer))
             
         # Triangle geometry
@@ -55,16 +55,14 @@ class VulkanWidget(QWidget):
         self.ibuf = self.ctx.create_buffer([0, 1, 2], bz.BufferType.INDEX, bz.MemoryUsage.STATIC, bz.DataType.UINT32)
         
         # Record commands
-        self.cmd = self.renderer.create_command_buffer()
+        self.cmd = self.ctx.create_command_buffer()
         self.cmd.begin()
-        self.cmd.begin_rendering(clear_color=[0.15, 0.15, 0.2, 1.0])
-        self.cmd.set_viewport()
-        self.cmd.set_scissor()
+        self.cmd.begin_rendering(self.renderer, clear_color=[0.15, 0.15, 0.2, 1.0])
         self.cmd.bind_pipeline(self.pipeline)
         self.cmd.bind_vertex_buffer(self.vbuf)
         self.cmd.bind_index_buffer(self.ibuf)
         self.cmd.draw_indexed(3)
-        self.cmd.end_rendering()
+        self.cmd.end_rendering(self.renderer)
         
     def tick(self):
         # begin_frame acquires swapchain image and handles automatic resize recreation

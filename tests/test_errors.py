@@ -1,0 +1,90 @@
+"""The exception type is the contract for whether you can carry on.
+
+Everything used to arrive as a bare RuntimeError, so a typo in a shader was
+indistinguishable from a lost device and neither could be handled.
+"""
+
+import numpy as np
+import pytest
+
+import bazalt as bz
+
+
+def test_every_error_shares_one_base(ctx):
+    for exc in (bz.InitializationError, bz.DeviceLostError, bz.OutOfMemoryError,
+                bz.ShaderError, bz.WindowError, bz.ResourceError):
+        assert issubclass(exc, bz.BazaltError)
+    assert issubclass(bz.BazaltError, Exception)
+
+
+def test_shader_error_carries_path_and_line(ctx, tmp_path):
+    """Hot reload in 0.6 depends on this being catchable and locatable."""
+    bad = tmp_path / "bad.frag"
+    bad.write_text("#version 450\nvoid main() { not_a_real_symbol; }\n")
+
+    with pytest.raises(bz.ShaderError) as info:
+        ctx.compile_shader(str(bad), bz.ShaderStage.FRAGMENT)
+
+    assert info.value.path == str(bad)
+    assert info.value.line == 2
+
+
+def test_shader_error_is_recoverable(ctx, tmp_path, triangle_shaders):
+    """A typo must not end the process — that is the whole point of hot reload."""
+    bad = tmp_path / "typo.frag"
+    bad.write_text("#version 450\nvoid main() { oops }\n")
+
+    try:
+        ctx.compile_shader(str(bad), bz.ShaderStage.FRAGMENT)
+    except bz.ShaderError:
+        pass
+
+    # Still usable afterwards.
+    target = bz.RenderTarget(ctx, 16, 16)
+    assert target.width == 16
+
+
+def test_missing_shader_file_is_a_resource_error_not_a_shader_error(ctx):
+    """A file that isn't there is a different problem from one that won't compile."""
+    with pytest.raises(bz.ResourceError):
+        ctx.compile_shader("does_not_exist.frag", bz.ShaderStage.VERTEX)
+
+
+def test_missing_texture_reports_why(ctx):
+    with pytest.raises(bz.ResourceError) as info:
+        ctx.load_texture("no_such_image.png")
+    # stb knows whether it was missing or corrupt; the message should say.
+    assert "no_such_image.png" in str(info.value)
+
+
+def test_invalid_validation_mode_names_the_valid_ones():
+    with pytest.raises(ValueError) as info:
+        bz.Context(validation="nonsense")
+    for mode in ("auto", "on", "off"):
+        assert mode in str(info.value)
+
+
+def test_second_live_context_is_refused(ctx):
+    """volk's function pointers are global, so a second Context corrupts the first.
+
+    This used to be an access violation with no diagnostic.
+    """
+    with pytest.raises(bz.InitializationError) as info:
+        bz.Context(validation="off")
+    assert "one bazalt Context" in str(info.value)
+
+
+def test_empty_buffer_list_is_rejected(ctx):
+    with pytest.raises(bz.ResourceError):
+        ctx.create_buffer([], bz.BufferType.VERTEX, bz.MemoryUsage.STATIC)
+
+
+def test_descriptor_pool_needs_at_least_one_descriptor(ctx):
+    with pytest.raises(bz.ResourceError):
+        ctx.create_descriptor_pool(max_sets=1)
+
+
+def test_pipeline_without_shaders_is_a_shader_error(ctx):
+    target = bz.RenderTarget(ctx, 16, 16)
+    with pytest.raises(bz.ShaderError):
+        ctx.pipeline_builder().build(target)

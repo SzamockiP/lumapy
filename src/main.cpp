@@ -504,6 +504,9 @@ PYBIND11_MODULE(_core, m) {
             self.log(severity, source, text);
         }, py::arg("text"), py::arg("severity") = Severity::Info,
            py::arg("source") = Source::General)
+        // Delivery is async; without flush(), asserting "no errors happened" only
+        // asserts "none had arrived yet".
+        .def("flush", &Logger::flush)
         .def_property("min_severity", &Logger::min_severity, &Logger::set_min_severity);
 
     // ── Context ──

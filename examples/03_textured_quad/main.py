@@ -2,8 +2,8 @@ import bazalt as bz
 
 # Create window, logger, and renderer
 logger = bz.Logger()
-@logger.on_error
-def error(msg):
+@logger.on_message
+def on_message(msg):
     print(msg)
 
 window = bz.Window(800, 600, "Bazalt Demo - Textured Quad")
@@ -21,7 +21,7 @@ texture = ctx.load_texture("../assets/wall.png")
 pipeline = (ctx.pipeline_builder()
     .vertex_shader(vert_spv)
     .fragment_shader(frag_spv)
-    .vertex_format([bz.Format.FLOAT2, bz.Format.FLOAT2])
+    .vertex_format([bz.VertexFormat.FLOAT2, bz.VertexFormat.FLOAT2])
     .texture(0, bz.ShaderStage.FRAGMENT, set=0)
     .build(renderer))
 
@@ -43,17 +43,15 @@ desc_set = pool.allocate_set(pipeline, set=0)
 desc_set.set_texture(0, texture)
 
 # Record commands
-cmd = renderer.create_command_buffer()
+cmd = ctx.create_command_buffer()
 cmd.begin()
-cmd.begin_rendering(clear_color=[0.1, 0.2, 0.3, 1.0])
-cmd.set_viewport()
-cmd.set_scissor()
+cmd.begin_rendering(renderer, clear_color=[0.1, 0.2, 0.3, 1.0])
 cmd.bind_pipeline(pipeline)
 cmd.bind_descriptor_set(desc_set, pipeline, set=0)
 cmd.bind_vertex_buffer(vbuf)
 cmd.bind_index_buffer(ibuf)
 cmd.draw_indexed(6)
-cmd.end_rendering()
+cmd.end_rendering(renderer)
 
 # Main loop
 while window.is_open():

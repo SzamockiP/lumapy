@@ -115,8 +115,24 @@ public:
 		if (severity < min_severity_.load())
 			return;
 
+		pending_.fetch_add(1);
 		messages_.push(LogMessage{ severity, source, std::move(text) });
 		message_semaphore_.release();
+	}
+
+	// Blocks until every queued message has reached its callbacks.
+	//
+	// Delivery is asynchronous, so without this a test asserting "no validation
+	// errors occurred" is really asserting "none had arrived yet" — a sleep() with
+	// extra steps. The GIL must be released or this deadlocks against the drain
+	// thread, which needs it to call back into Python.
+	void flush()
+	{
+		py::gil_scoped_release release;
+		while (pending_.load() > 0)
+		{
+			std::this_thread::yield();
+		}
 	}
 
 	// An Error is just a message that also happens to be returned. Logging it
@@ -137,11 +153,15 @@ private:
 			{
 				callback(*msg);
 			}
+			// Decremented only after the callbacks have run, so flush() really does
+			// mean "delivered", not "dequeued".
+			pending_.fetch_sub(1);
 		}
 	}
 
 	MpscQueue<LogMessage> messages_{};
 	std::counting_semaphore<> message_semaphore_{ 0 };
+	std::atomic<int> pending_{ 0 };
 
 	std::atomic<Severity> min_severity_;
 

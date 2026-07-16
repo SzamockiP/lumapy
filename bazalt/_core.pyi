@@ -1,420 +1,365 @@
-"""Type stubs for bazalt._core (native Vulkan renderer)."""
-
 from __future__ import annotations
 
 from enum import IntEnum
-from typing import Optional, Sequence, overload, Callable
+from typing import Any, Callable, Optional, Sequence
+
+import numpy as np
+
+# ── Errors ─────────────────────────────────────────────────────────────
+#
+# The exception type is the contract for whether you can carry on: a shader typo
+# is recoverable, a lost device is not.
+
+class BazaltError(Exception):
+    """Base class for every error bazalt raises."""
+    ...
+
+class InitializationError(BazaltError):
+    """No Vulkan, no suitable GPU, or a required Feature is missing. Fatal."""
+    ...
+
+class DeviceLostError(BazaltError):
+    """VK_ERROR_DEVICE_LOST. The Context is unusable afterwards."""
+    vk_result: str
+
+class OutOfMemoryError(BazaltError):
+    """Host or device memory exhausted. Sometimes recoverable."""
+    vk_result: str
+
+class ShaderError(BazaltError):
+    """Compilation or pipeline creation failed. Recoverable."""
+    path: str
+    line: int
+    """1-based line number, or -1 when it could not be determined."""
+
+class WindowError(BazaltError):
+    """Window or surface creation failed; carries the platform's own message."""
+    ...
+
+class ResourceError(BazaltError):
+    """Missing file, bad format, or an exhausted pool. Recoverable."""
+    ...
+
+# ── Logging ────────────────────────────────────────────────────────────
+
+class Severity(IntEnum):
+    """Ordered, so `msg.severity >= Severity.WARNING` works."""
+    INFO = 0
+    WARNING = 1
+    ERROR = 2
+
+class Source(IntEnum):
+    """Which subsystem produced a message, so callbacks can route without
+    pattern-matching on the text."""
+    GENERAL = 0
+    VALIDATION = 1
+    WINDOW = 2
+    SHADER = 3
+    UPLOAD = 4
+    DEVICE = 5
+
+class LogMessage:
+    """A log message with its severity as data rather than a string prefix."""
+
+    @property
+    def severity(self) -> Severity: ...
+    @property
+    def source(self) -> Source: ...
+    @property
+    def text(self) -> str: ...
+
+class Logger:
+    def __init__(self, min_severity: Severity = Severity.WARNING) -> None: ...
+
+    def on_message(self, callback: Callable[[LogMessage], None]) -> Callable[[LogMessage], None]:
+        """Register a callback. Returns it, so this works as a decorator."""
+        ...
+
+    def log(self, text: str, severity: Severity = Severity.INFO,
+            source: Source = Source.GENERAL) -> None: ...
+
+    def flush(self) -> None:
+        """Block until every queued message has reached its callbacks.
+
+        Delivery is asynchronous, so without this, asserting that nothing was
+        logged only asserts that nothing had arrived yet.
+        """
+        ...
+
+    min_severity: Severity
+
+# ── Capabilities ───────────────────────────────────────────────────────
+
+class Feature(IntEnum):
+    """Optional GPU capabilities, named by what they do.
+
+    Vulkan promotes extensions into core versions, so the same capability is
+    spelled differently per driver. Which spelling to use is bazalt's problem.
+    """
+    ANISOTROPIC_FILTERING = 0
+    WIREFRAME = 1
+    WIDE_LINES = 2
+    DEPTH_CLAMP = 3
+    SAMPLE_RATE_SHADING = 4
+    MULTI_DRAW_INDIRECT = 5
+    SHADER_FLOAT64 = 6
 
 # ── Enums ──────────────────────────────────────────────────────────────
 
 class BufferType(IntEnum):
-    """Type of GPU buffer."""
-    VERTEX: int
-    INDEX: int
-    UNIFORM: int
-    STORAGE: int
+    VERTEX = 0
+    INDEX = 1
+    UNIFORM = 2
+    STORAGE = 3
 
 class DataType(IntEnum):
-    """Element data type for buffer creation."""
-    FLOAT: int
-    UINT32: int
-    UINT16: int
-    INT32: int
+    FLOAT = 0
+    UINT32 = 1
+    UINT16 = 2
+    INT32 = 3
 
 class ShaderStage(IntEnum):
-    """Shader pipeline stage."""
-    VERTEX: int
-    FRAGMENT: int
+    VERTEX = 0
+    FRAGMENT = 1
 
-class Format(IntEnum):
-    """Vertex attribute format."""
-    FLOAT2: int
-    FLOAT3: int
-    FLOAT4: int
+class VertexFormat(IntEnum):
+    """Vertex attribute layout. Renamed from `Format`, which is reserved for
+    pixel formats."""
+    FLOAT2 = 0
+    FLOAT3 = 1
+    FLOAT4 = 2
 
 class CullMode(IntEnum):
-    """Triangle culling mode."""
-    NONE: int
-    BACK: int
-    FRONT: int
-    FRONT_AND_BACK: int
+    NONE = 0
+    BACK = 1
+    FRONT = 2
+    FRONT_AND_BACK = 3
 
 class FrontFace(IntEnum):
-    """Winding order for front-facing triangles."""
-    CLOCKWISE: int
-    COUNTER_CLOCKWISE: int
+    CLOCKWISE = 0
+    COUNTER_CLOCKWISE = 1
 
 class MemoryUsage(IntEnum):
-    """Memory usage strategy for buffer creation."""
-    STATIC: int
-    DYNAMIC: int
-
-# ── Data Classes ───────────────────────────────────────────────────────
+    STATIC = 0
+    DYNAMIC = 1
 
 class MouseState:
-    """Accumulated mouse movement state."""
-    dx: float
-    """Cumulative X movement since window creation."""
-    dy: float
-    """Cumulative Y movement since window creation."""
+    @property
+    def dx(self) -> float: ...
+    @property
+    def dy(self) -> float: ...
 
-# ── GPU Resources ──────────────────────────────────────────────────────
+# ── Resources ──────────────────────────────────────────────────────────
 
 class Buffer:
-    """GPU buffer (vertex, index, uniform, or storage)."""
-
-    @overload
     def update(self, data: bytes) -> None: ...
-    @overload
-    def update(self, array: buffer) -> None: ...
-    @overload
-    def update(self, list: list, data_type: Optional[DataType] = None) -> None: ...
-    def update(self, *args, **kwargs) -> None:
-        """Update buffer contents.
+    def update(self, array: Any) -> None:
+        """Upload from any C-contiguous buffer-protocol object.
 
-        Accepts raw bytes, a numpy array (buffer protocol), or a Python list.
-        For lists, the data type is inferred from elements unless ``data_type``
-        is specified explicitly.
+        Raises ResourceError for a strided view (`arr.T`, `arr[::2]`): copying
+        silently would hide an allocation on every upload. Pass
+        `numpy.ascontiguousarray(arr)` to be explicit.
         """
         ...
+    def update(self, list: list, data_type: Optional[DataType] = None) -> None: ...
 
-class ShaderModule:
-    """Compiled SPIR-V shader module."""
-    ...
+class ShaderModule: ...
 
 class Texture:
-    """GPU texture loaded from an image file."""
-
     @property
-    def width(self) -> int:
-        """Texture width in pixels."""
-        ...
-
+    def width(self) -> int: ...
     @property
-    def height(self) -> int:
-        """Texture height in pixels."""
-        ...
+    def height(self) -> int: ...
 
-class Pipeline:
-    """Compiled graphics pipeline (immutable after creation)."""
-    ...
+class Pipeline: ...
 
 class DescriptorSet:
-    """A descriptor set binding resources to a pipeline."""
-    
-    def set_texture(self, binding: int, texture: Texture) -> None:
-        """Write a texture to this descriptor set."""
-        ...
-        
-    def set_buffer(self, binding: int, buffer: Buffer) -> None:
-        """Write a buffer to this descriptor set."""
-        ...
+    def set_texture(self, binding: int, texture: Texture) -> None: ...
+    def set_buffer(self, binding: int, buffer: Buffer) -> None: ...
 
 class DescriptorPool:
-    """A pool from which descriptor sets can be allocated."""
-    
-    def allocate_set(self, pipeline: Pipeline, set: int) -> DescriptorSet:
-        """Allocate a static descriptor set (1 internal copy) for materials/textures."""
-        ...
-        
-    def allocate_frame_set(self, pipeline: Pipeline, set: int) -> DescriptorSet:
-        """Allocate a per-frame descriptor set for per-frame updated buffers."""
+    def allocate_set(self, pipeline: Pipeline, set: int) -> DescriptorSet: ...
+    def allocate_frame_set(self, pipeline: Pipeline, set: int) -> DescriptorSet: ...
+
+# ── Render targets ─────────────────────────────────────────────────────
+
+class RenderTargetBase:
+    """Anything that can be drawn into.
+
+    Both `RenderTarget` and `SwapchainRenderer` are one of these: presenting to
+    a window is one way to consume a rendered image, not the definition of
+    rendering.
+    """
+    ...
+
+class RenderTarget(RenderTargetBase):
+    """An offscreen target backed by its own images. No window required."""
+
+    def __init__(self, context: Context, width: int, height: int,
+                 depth: bool = False) -> None: ...
+
+    @property
+    def width(self) -> int: ...
+    @property
+    def height(self) -> int: ...
+
+    def read_pixels(self) -> np.ndarray:
+        """Copy the colour attachment back to host memory as (height, width, 4) uint8.
+
+        Blocking, and it stalls the GPU — intended for tests and debugging.
+        """
         ...
 
 class PipelineBuilder:
-    """Fluent builder for constructing graphics pipelines.
+    def vertex_shader(self, shader: ShaderModule) -> PipelineBuilder: ...
+    def fragment_shader(self, shader: ShaderModule) -> PipelineBuilder: ...
+    def vertex_format(self, formats: list[VertexFormat]) -> PipelineBuilder: ...
+    def depth_test(self, enable: bool) -> PipelineBuilder: ...
+    def cull_mode(self, mode: CullMode, front_face: FrontFace) -> PipelineBuilder: ...
+    def blend(self, enable: bool) -> PipelineBuilder: ...
+    def push_constant(self, size: int, stage: ShaderStage) -> PipelineBuilder: ...
+    def uniform_buffer(self, binding: int, stage: ShaderStage, set: int) -> PipelineBuilder: ...
+    def storage_buffer(self, binding: int, stage: ShaderStage, set: int) -> PipelineBuilder: ...
+    def texture(self, binding: int, stage: ShaderStage, set: int) -> PipelineBuilder: ...
 
-    All configuration methods return ``self`` for chaining.
-    """
-
-    def vertex_shader(self, shader: ShaderModule) -> PipelineBuilder:
-        """Set the vertex shader stage."""
+    def build(self, target: RenderTargetBase) -> Pipeline:
+        """Build against any render target — a window or an offscreen image."""
         ...
-
-    def fragment_shader(self, shader: ShaderModule) -> PipelineBuilder:
-        """Set the fragment shader stage."""
-        ...
-
-    def vertex_format(self, formats: list[Format]) -> PipelineBuilder:
-        """Define vertex input layout as a list of attribute formats."""
-        ...
-
-    def depth_test(self, enable: bool) -> PipelineBuilder:
-        """Enable or disable depth testing and writing."""
-        ...
-
-    def cull_mode(self, mode: CullMode, front_face: FrontFace) -> PipelineBuilder:
-        """Set triangle culling mode and front-face winding order."""
-        ...
-
-    def blend(self, enable: bool) -> PipelineBuilder:
-        """Enable or disable alpha blending."""
-        ...
-
-    def push_constant(self, size: int, stage: ShaderStage) -> PipelineBuilder:
-        """Declare a push constant range.
-
-        Args:
-            size: Size in bytes.
-            stage: Shader stage that uses this constant.
-        """
-        ...
-
-    def uniform_buffer(self, binding: int, stage: ShaderStage, set: int) -> PipelineBuilder:
-        """Declare a uniform buffer descriptor binding."""
-        ...
-
-    def storage_buffer(self, binding: int, stage: ShaderStage, set: int) -> PipelineBuilder:
-        """Declare a storage buffer descriptor binding."""
-        ...
-
-    def texture(self, binding: int, stage: ShaderStage, set: int) -> PipelineBuilder:
-        """Declare a combined image sampler descriptor binding."""
-        ...
-
-    def build(self, renderer: SwapchainRenderer) -> Pipeline:
-        """Compile the pipeline for a given renderer. Raises ``RuntimeError`` on failure.
-
-        Args:
-            renderer: The swapchain renderer providing color/depth format information.
-        """
-        ...
-
-# ── Command Buffer ─────────────────────────────────────────────────────
 
 class CommandBuffer:
-    """Deferred GPU command recorder.
+    """Records commands once; they are replayed on every submit."""
 
-    Commands are recorded once via the ``begin…``/``end…`` methods,
-    then replayed every frame when passed to ``SwapchainRenderer.submit()``.
-    """
+    def begin(self) -> None: ...
 
-    def begin(self) -> None:
-        """Clear previously recorded commands and start a new recording."""
-        ...
+    def begin_rendering(self, target: RenderTargetBase,
+                        clear_color: Sequence[float] = (0.0, 0.0, 0.0, 1.0)) -> None:
+        """Start rendering into `target`.
 
-    def begin_rendering(self, *, clear_color: list[float]) -> None:
-        """Begin a dynamic rendering pass.
-
-        Args:
-            clear_color: RGBA clear color as ``[r, g, b, a]`` (0.0–1.0).
+        Also emits a viewport and scissor covering the whole target, so the
+        common case needs no further calls.
         """
         ...
 
-    def end_rendering(self) -> None:
-        """End the current rendering pass and transition to present layout."""
+    def end_rendering(self, target: RenderTargetBase) -> None: ...
+
+    def set_viewport(self, x: float, y: float, width: float, height: float) -> None:
+        """Override the automatic full-target viewport (split-screen and similar)."""
         ...
 
-    def set_viewport(self) -> None:
-        """Set the viewport to cover the full swapchain extent."""
+    def set_scissor(self, x: int, y: int, width: int, height: int) -> None: ...
+
+    def bind_pipeline(self, pipeline: Pipeline) -> None: ...
+    def bind_vertex_buffer(self, buffer: Buffer) -> None: ...
+    def bind_index_buffer(self, buffer: Buffer) -> None: ...
+    def draw(self, vertex_count: int) -> None: ...
+    def draw_indexed(self, index_count: int, first_index: int = 0,
+                     vertex_offset: int = 0) -> None: ...
+    def draw_indexed_instanced(self, index_count: int, instance_count: int,
+                               first_index: int = 0, vertex_offset: int = 0) -> None: ...
+
+    def push_constants(self, pipeline: Pipeline, offset: int, data: bytes) -> None:
+        """The Pipeline already knows which stages its range covers."""
         ...
 
-    def set_scissor(self) -> None:
-        """Set the scissor rectangle to cover the full swapchain extent."""
-        ...
-
-    def bind_pipeline(self, pipeline: Pipeline) -> None:
-        """Bind a graphics pipeline for subsequent draw calls."""
-        ...
-
-    def bind_vertex_buffer(self, buffer: Buffer) -> None:
-        """Bind a vertex buffer at binding 0."""
-        ...
-
-    def bind_index_buffer(self, buffer: Buffer) -> None:
-        """Bind an index buffer (uint32 indices)."""
-        ...
-
-    def draw(self, vertex_count: int) -> None:
-        """Record a non-indexed draw call."""
-        ...
-
-    def draw_indexed(self, index_count: int, first_index: int = 0, vertex_offset: int = 0) -> None:
-        """Record an indexed draw call (1 instance)."""
-        ...
-
-    def draw_indexed_instanced(self, index_count: int, instance_count: int, first_index: int = 0, vertex_offset: int = 0) -> None:
-        """Record an indexed, instanced draw call."""
-        ...
-
-    def push_constants(
-        self,
-        pipeline: Pipeline,
-        stage: ShaderStage,
-        offset: int,
-        data: bytes,
-    ) -> None:
-        """Upload push constant data.
-
-        Args:
-            pipeline: Pipeline whose layout defines the push constant range.
-            stage: Target shader stage.
-            offset: Byte offset into the push constant range.
-            data: Raw bytes to upload.
-        """
-        ...
-
-    def bind_descriptor_set(
-        self, descriptor_set: DescriptorSet, pipeline: Pipeline, set: int
-    ) -> None:
-        """Bind a descriptor set to the specified set index."""
-        ...
-
-# ── Window ─────────────────────────────────────────────────────────────
+    def bind_descriptor_set(self, descriptor_set: DescriptorSet, pipeline: Pipeline,
+                            set: int) -> None: ...
 
 class Window:
-    """Manages the OS window and GLFW input callbacks."""
-
-    def __init__(self, width: int, height: int, title: str) -> None: ...
-
-    def is_open(self) -> bool:
-        """Return ``True`` if the window is open."""
-        ...
-
-    def should_close(self) -> bool:
-        """Return ``True`` if the window should close."""
-        ...
-
-    def poll_events(self) -> None:
-        """Poll and process OS input/window events."""
-        ...
-
-    def is_key_pressed(self, key: int) -> bool:
-        """Check if a keyboard key is currently held down.
-
-        Use module-level ``KEY_*`` constants for key codes.
-        """
-        ...
-
-    def is_mouse_button_pressed(self, button: int) -> bool:
-        """Check if a mouse button is currently held down.
-
-        Use ``MOUSE_BUTTON_LEFT``, ``MOUSE_BUTTON_RIGHT``,
-        ``MOUSE_BUTTON_MIDDLE``.
-        """
-        ...
-
-    def set_cursor_mode(self, mode: int) -> None:
-        """Set cursor visibility/capture mode.
-
-        Use ``CURSOR_NORMAL``, ``CURSOR_DISABLED``, or ``CURSOR_HIDDEN``.
-        """
-        ...
-
-    def get_mouse_state(self) -> MouseState:
-        """Return the current accumulated mouse state."""
-        ...
-
-    def set_title(self, title: str) -> None:
-        """Update the window title."""
-        ...
-
+    def __init__(self, width: int, height: int, title: str,
+                 logger: Optional[Logger] = None) -> None: ...
+    def is_open(self) -> bool: ...
+    def should_close(self) -> bool: ...
+    def poll_events(self) -> None: ...
+    def is_key_pressed(self, key: int) -> bool: ...
+    def is_mouse_button_pressed(self, button: int) -> bool: ...
+    def set_cursor_mode(self, mode: int) -> None: ...
+    def get_mouse_state(self) -> MouseState: ...
+    def set_title(self, title: str) -> None: ...
     @property
-    def width(self) -> int:
-        """Current window width in pixels (updates on resize)."""
-        ...
-
+    def width(self) -> int: ...
     @property
-    def height(self) -> int:
-        """Current window height in pixels (updates on resize)."""
-        ...
-
-# ── Logger ─────────────────────────────────────────────────────────────
-
-class Logger:
-    """Asynchronous validation/error logger."""
-
-    def __init__(self) -> None: ...
-
-    def on_error(self, callback: Callable[[str], None]) -> Callable[[str], None]:
-        """Register an error/log callback. Can be used as a decorator."""
-        ...
-
-    def log(self, msg: str) -> None:
-        """Send a message to the logger."""
-        ...
-
-# ── Context ────────────────────────────────────────────────────────────
+    def height(self) -> int: ...
 
 class Context:
-    """Manages the Vulkan instance, device, queues, allocator, and command pool.
+    """The GPU device, and the factory for everything that lives on it.
 
-    This is the shared GPU context that can be used by one or more renderers.
-    Resources (buffers, textures, shaders, pipelines) are created through this class.
+    Only one Context may be alive per process: volk binds its global function
+    pointers to a single device, so a second one silently corrupts the first.
+    Creating them one after another is fine.
     """
 
-    def __init__(self, logger: Optional[Logger] = None) -> None: ...
-
-    @overload
-    def create_buffer(
-        self, list: list, type: BufferType, usage: MemoryUsage, data_type: Optional[DataType] = None
-    ) -> Buffer: ...
-    @overload
-    def create_buffer(self, array: buffer, type: BufferType, usage: MemoryUsage) -> Buffer: ...
-    @overload
-    def create_buffer(self, size_in_bytes: int, type: BufferType, usage: MemoryUsage) -> Buffer: ...
-    def create_buffer(self, *args, **kwargs) -> Buffer:
-        """Create a GPU buffer.
-
-        Three overloads:
-
-        1. ``create_buffer(list, type, usage, data_type=None)`` — from a Python list
-        2. ``create_buffer(array, type, usage)`` — from a numpy array (buffer protocol)
-        3. ``create_buffer(size_in_bytes, type, usage)`` — empty buffer of given size
+    def __init__(self, logger: Optional[Logger] = None, validation: str = "auto",
+                 features: Sequence[Feature] = (), optional: Sequence[Feature] = (),
+                 raw_extensions: Sequence[str] = ()) -> None:
         """
-        ...
-
-    def pipeline_builder(self) -> PipelineBuilder:
-        """Create a new pipeline builder."""
-        ...
-
-    def compile_shader(self, path: str, stage: ShaderStage) -> ShaderModule:
-        """Compile a GLSL shader file to SPIR-V at runtime.
-
         Args:
-            path: Path to the ``.vert`` or ``.frag`` source file.
-            stage: Shader stage (``VERTEX`` or ``FRAGMENT``).
+            logger: defaults to one printing warnings to stderr.
+            validation: "auto" (on when the layers are installed), "on", or "off".
+            features: required. Gates GPU selection; InitializationError if absent.
+            optional: enabled when present; query with `supports()`.
+            raw_extensions: escape hatch. You shouldn't need this.
         """
         ...
 
-    def load_texture(self, path: str) -> Texture:
-        """Load an image file as a GPU texture (supports PNG, JPG, BMP, etc.)."""
+    @property
+    def logger(self) -> Logger: ...
+    @property
+    def device_name(self) -> str: ...
+    @property
+    def api_version(self) -> str: ...
+    @property
+    def headless(self) -> bool:
+        """True when no windowing extensions were available, so no
+        SwapchainRenderer can be created against this Context."""
         ...
-        
-    def create_descriptor_pool(
-        self, max_sets: int, samplers: int = 0, uniform_buffers: int = 0, storage_buffers: int = 0
-    ) -> DescriptorPool:
-        """Create a descriptor pool for allocating descriptor sets."""
-        ...
 
-# ── SwapchainRenderer ──────────────────────────────────────────────────
+    def supports(self, feature: Feature) -> bool: ...
 
-class SwapchainRenderer:
-    """Manages a Vulkan swapchain, synchronization, and frame presentation.
+    def create_buffer(self, list: list, type: BufferType, usage: MemoryUsage,
+                      data_type: Optional[DataType] = None) -> Buffer: ...
+    def create_buffer(self, array: Any, type: BufferType, usage: MemoryUsage) -> Buffer: ...
+    def create_buffer(self, size_in_bytes: int, type: BufferType,
+                      usage: MemoryUsage) -> Buffer: ...
 
-    Requires a ``Context`` for GPU access and a window (or HWND) as the render target.
-    """
+    def pipeline_builder(self) -> PipelineBuilder: ...
+    def compile_shader(self, path: str, stage: ShaderStage) -> ShaderModule: ...
+    def load_texture(self, path: str) -> Texture: ...
+    def create_descriptor_pool(self, max_sets: int, samplers: int = 0,
+                               uniform_buffers: int = 0,
+                               storage_buffers: int = 0) -> DescriptorPool: ...
 
-    @overload
-    def __init__(self, window: Window, context: Context) -> None: ...
-    @overload
-    def __init__(self, win32_hwnd: int, context: Context) -> None: ...
-    def __init__(self, *args, **kwargs) -> None: ...
-
-    def begin_frame(self) -> bool:
-        """Acquire the next swapchain image.
-
-        Returns ``True`` if successful, or ``False`` if the frame should be skipped (e.g. window minimized).
-        """
+    def create_command_buffer(self) -> CommandBuffer:
+        """Command buffers are a device resource, so they come from the Context —
+        a headless Context has no renderer to ask."""
         ...
 
     def submit(self, cmd: CommandBuffer) -> None:
-        """Submit a recorded command buffer for the current frame to the presentation queue."""
+        """Execute a command buffer with no swapchain and no present.
+
+        Blocking. This is the headless path.
+        """
         ...
 
-    def create_command_buffer(self) -> CommandBuffer:
-        """Allocate a new command buffer."""
+class SwapchainRenderer(RenderTargetBase):
+    """Presents to a window. One implementation of a render target."""
+
+    def __init__(self, window: Window, context: Context) -> None: ...
+    def __init__(self, win32_hwnd: int, context: Context) -> None:
+        """Attach to an existing native window (Windows only)."""
         ...
+
+    def begin_frame(self) -> bool:
+        """Acquire the next swapchain image. False when the frame should be skipped."""
+        ...
+
+    def submit(self, cmd: CommandBuffer) -> None:
+        """Submit for the current frame and present."""
+        ...
+
+    @property
+    def width(self) -> int: ...
+    @property
+    def height(self) -> int: ...
 
 # ── Keyboard Constants ─────────────────────────────────────────────────
 

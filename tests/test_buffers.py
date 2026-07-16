@@ -1,0 +1,89 @@
+"""Buffer uploads, and the stride bug that used to corrupt them silently."""
+
+import numpy as np
+import pytest
+
+import bazalt as bz
+
+
+def test_contiguous_array_uploads(ctx):
+    data = np.arange(12, dtype=np.float32)
+    buf = ctx.create_buffer(data, bz.BufferType.VERTEX, bz.MemoryUsage.STATIC)
+    assert buf is not None
+
+
+@pytest.mark.parametrize("make_strided, label", [
+    (lambda: np.arange(24, dtype=np.float32).reshape(4, 6).T, "transposed"),
+    (lambda: np.arange(20, dtype=np.float32)[::2], "every other element"),
+    (lambda: np.arange(36, dtype=np.float32).reshape(6, 6)[:, ::2], "strided columns"),
+])
+def test_strided_arrays_are_rejected_not_silently_mangled(ctx, make_strided, label):
+    """create_buffer used to memcpy size*itemsize bytes and ignore strides.
+
+    A transposed or sliced view therefore uploaded whatever happened to be
+    adjacent in memory, with no error at all.
+    """
+    arr = make_strided()
+    assert not arr.flags["C_CONTIGUOUS"], f"{label} should not be contiguous"
+
+    with pytest.raises(bz.ResourceError) as info:
+        ctx.create_buffer(arr, bz.BufferType.VERTEX, bz.MemoryUsage.STATIC)
+    assert "contiguous" in str(info.value)
+
+
+def test_error_message_suggests_the_fix(ctx):
+    arr = np.arange(24, dtype=np.float32).reshape(4, 6).T
+    with pytest.raises(bz.ResourceError) as info:
+        ctx.create_buffer(arr, bz.BufferType.VERTEX, bz.MemoryUsage.STATIC)
+    assert "ascontiguousarray" in str(info.value)
+
+    # And that suggestion actually works.
+    ctx.create_buffer(np.ascontiguousarray(arr), bz.BufferType.VERTEX, bz.MemoryUsage.STATIC)
+
+
+def test_size_one_dimensions_are_not_false_positives(ctx):
+    """A dimension of extent 1 has an arbitrary stride; numpy fills in junk.
+
+    Comparing it against the packed layout reports non-contiguity that isn't real.
+    """
+    arr = np.zeros((1, 8), dtype=np.float32)
+    ctx.create_buffer(arr, bz.BufferType.VERTEX, bz.MemoryUsage.STATIC)
+
+
+def test_strided_update_is_rejected(ctx):
+    buf = ctx.create_buffer(64, bz.BufferType.UNIFORM, bz.MemoryUsage.DYNAMIC)
+    arr = np.arange(32, dtype=np.float32).reshape(4, 8).T
+    with pytest.raises(bz.ResourceError):
+        buf.update(arr)
+
+
+def test_list_overload_still_wins_over_the_buffer_overload(ctx):
+    """A Python list must not be captured by the array overload.
+
+    numpy would convert it to float64, so vertex data would silently double in
+    size and be misread by the shader.
+    """
+    buf = ctx.create_buffer([1.0, 2.0, 3.0, 4.0], bz.BufferType.VERTEX,
+                            bz.MemoryUsage.DYNAMIC, bz.DataType.FLOAT)
+    # 4 float32s, not 4 float64s.
+    assert buf is not None
+    buf.update([5.0, 6.0, 7.0, 8.0])
+
+
+@pytest.mark.parametrize("dtype", [bz.DataType.FLOAT, bz.DataType.UINT32,
+                                   bz.DataType.UINT16, bz.DataType.INT32])
+def test_every_data_type_can_be_created_and_updated(ctx, dtype):
+    """UINT16 could be created but not updated — the update path threw."""
+    buf = ctx.create_buffer([1, 2, 3] if dtype != bz.DataType.FLOAT else [1.0, 2.0, 3.0],
+                            bz.BufferType.STORAGE, bz.MemoryUsage.DYNAMIC, dtype)
+    buf.update([4, 5, 6] if dtype != bz.DataType.FLOAT else [4.0, 5.0, 6.0], dtype)
+
+
+def test_sized_buffer_without_data(ctx):
+    buf = ctx.create_buffer(256, bz.BufferType.UNIFORM, bz.MemoryUsage.DYNAMIC)
+    assert buf is not None
+
+
+def test_bytes_upload(ctx):
+    buf = ctx.create_buffer(64, bz.BufferType.UNIFORM, bz.MemoryUsage.DYNAMIC)
+    buf.update(b"\x00" * 64)

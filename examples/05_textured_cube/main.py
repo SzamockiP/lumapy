@@ -46,7 +46,7 @@ class Camera:
 
 # Create window, logger, and renderer
 logger = bz.Logger()
-logger.on_error(lambda msg: print(msg))
+logger.on_message(lambda msg: print(f"[{msg.severity}] {msg.text}"))
 
 window = bz.Window(1024, 720, "Bazalt Demo - Textured Multi-Cube")
 ctx = bz.Context(logger)
@@ -61,7 +61,7 @@ frag_spv = ctx.compile_shader("cube_tex.frag", bz.ShaderStage.FRAGMENT)
 pipeline = (ctx.pipeline_builder()
     .vertex_shader(vert_spv)
     .fragment_shader(frag_spv)
-    .vertex_format([bz.Format.FLOAT3, bz.Format.FLOAT2])
+    .vertex_format([bz.VertexFormat.FLOAT3, bz.VertexFormat.FLOAT2])
     .depth_test(True)
     .uniform_buffer(0, bz.ShaderStage.VERTEX, set=0)
     .texture(0, bz.ShaderStage.FRAGMENT, set=1)
@@ -132,11 +132,9 @@ crate_set = pool.allocate_set(pipeline, set=1)
 crate_set.set_texture(0, tex2)
 
 # Record commands
-cmd = renderer.create_command_buffer()
+cmd = ctx.create_command_buffer()
 cmd.begin()
-cmd.begin_rendering(clear_color=[0.1, 0.2, 0.3, 1.0])
-cmd.set_viewport()
-cmd.set_scissor()
+cmd.begin_rendering(renderer, clear_color=[0.1, 0.2, 0.3, 1.0])
 cmd.bind_pipeline(pipeline)
 cmd.bind_descriptor_set(frame_set, pipeline, set=0)
 cmd.bind_vertex_buffer(vbuf)
@@ -150,7 +148,7 @@ cmd.draw_indexed(18, first_index=0)
 cmd.bind_descriptor_set(crate_set, pipeline, set=1)
 cmd.draw_indexed(18, first_index=18)
 
-cmd.end_rendering()
+cmd.end_rendering(renderer)
 
 # Main loop
 camera = Camera(pos=(0.0, 0.0, 3.0), speed=2.5)

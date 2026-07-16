@@ -4,7 +4,7 @@ build-backend = "scikit_build_core.build"
 
 [project]
 name = "bazalt"
-version = "0.3.0"
+version = "0.4.0"
 description = "Python library for rapid GPU shader prototyping using Vulkan"
 requires-python = ">=3.10"
 license = {text = "MIT"}
@@ -26,6 +26,10 @@ Repository = "https://github.com/SzamockiP/bazalt"
 
 [project.optional-dependencies]
 examples = ["PyGLM"]
+test = ["pytest", "numpy"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
 
 [tool.scikit-build]
 wheel.packages = ["bazalt"]
