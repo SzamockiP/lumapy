@@ -9,8 +9,11 @@
 #include <unordered_map>
 #include "ShaderCompiler.hpp"
 #include "Context.hpp"
+#include "RenderTarget.hpp"
 
-enum class Format {
+// Renamed from Format: this describes a vertex attribute, and `Format` is needed
+// for pixel formats in 0.5.
+enum class VertexFormat {
     FLOAT2,
     FLOAT3,
     FLOAT4
@@ -33,12 +36,26 @@ public:
     // Maps binding index -> VkDescriptorType so DescriptorSet knows what type to write
     using BindingTypeMap = std::unordered_map<uint32_t, VkDescriptorType>;
 
-    Pipeline(std::shared_ptr<Context> context, VkPipeline pipeline, VkPipelineLayout layout, 
+    Pipeline(std::shared_ptr<Context> context, VkPipeline pipeline, VkPipelineLayout layout,
              std::vector<VkDescriptorSetLayout> descLayouts = {},
-             std::map<uint32_t, BindingTypeMap> bindingTypes = {})
+             std::map<uint32_t, BindingTypeMap> bindingTypes = {},
+             VkShaderStageFlags pushConstantStages = 0,
+             VkPipelineBindPoint bindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS)
         : context_(context), pipeline_(pipeline), layout_(layout),
           desc_layouts_(std::move(descLayouts)),
-          binding_types_(std::move(bindingTypes)) {}
+          binding_types_(std::move(bindingTypes)),
+          push_constant_stages_(pushConstantStages),
+          bind_point_(bindPoint) {}
+
+    // Carried on the Pipeline so command recording doesn't hardcode
+    // VK_PIPELINE_BIND_POINT_GRAPHICS. Compute pipelines (0.6) then need no
+    // change at the call sites.
+    VkPipelineBindPoint bind_point() const { return bind_point_; }
+
+    // The builder already knows which stages the push constant range covers, so
+    // push_constants() doesn't need the caller to repeat it — and can't be given
+    // a mismatched one.
+    VkShaderStageFlags push_constant_stages() const { return push_constant_stages_; }
 
     ~Pipeline() {
         if (context_) {
@@ -62,7 +79,9 @@ public:
     Pipeline(Pipeline&& other) noexcept
         : context_(std::move(other.context_)), pipeline_(other.pipeline_), layout_(other.layout_),
           desc_layouts_(std::move(other.desc_layouts_)),
-          binding_types_(std::move(other.binding_types_)) {
+          binding_types_(std::move(other.binding_types_)),
+          push_constant_stages_(other.push_constant_stages_),
+          bind_point_(other.bind_point_) {
         other.pipeline_ = VK_NULL_HANDLE;
         other.layout_ = VK_NULL_HANDLE;
     }
@@ -87,7 +106,9 @@ public:
             layout_ = other.layout_;
             desc_layouts_ = std::move(other.desc_layouts_);
             binding_types_ = std::move(other.binding_types_);
-            
+            push_constant_stages_ = other.push_constant_stages_;
+            bind_point_ = other.bind_point_;
+
             other.pipeline_ = VK_NULL_HANDLE;
             other.layout_ = VK_NULL_HANDLE;
         }
@@ -123,6 +144,8 @@ private:
     VkPipelineLayout layout_;
     std::vector<VkDescriptorSetLayout> desc_layouts_;
     std::map<uint32_t, BindingTypeMap> binding_types_;
+    VkShaderStageFlags push_constant_stages_ = 0;
+    VkPipelineBindPoint bind_point_ = VK_PIPELINE_BIND_POINT_GRAPHICS;
 };
 
 class PipelineBuilder {
@@ -139,7 +162,7 @@ public:
         return *this;
     }
 
-    PipelineBuilder& vertexFormat(const std::vector<Format>& formats) {
+    PipelineBuilder& vertexFormat(const std::vector<VertexFormat>& formats) {
         formats_ = formats;
         return *this;
     }
@@ -288,17 +311,17 @@ public:
             attributeDescriptions[i].location = static_cast<uint32_t>(i);
             
             switch (formats_[i]) {
-                case Format::FLOAT2: 
+                case VertexFormat::FLOAT2:
                     attributeDescriptions[i].format = VK_FORMAT_R32G32_SFLOAT;
                     attributeDescriptions[i].offset = offset;
                     offset += 8;
                     break;
-                case Format::FLOAT3:
+                case VertexFormat::FLOAT3:
                     attributeDescriptions[i].format = VK_FORMAT_R32G32B32_SFLOAT;
                     attributeDescriptions[i].offset = offset;
                     offset += 12;
                     break;
-                case Format::FLOAT4:
+                case VertexFormat::FLOAT4:
                     attributeDescriptions[i].format = VK_FORMAT_R32G32B32A32_SFLOAT;
                     attributeDescriptions[i].offset = offset;
                     offset += 16;
@@ -485,8 +508,20 @@ public:
             return std::unexpected(*e);
         }
 
+        VkShaderStageFlags push_stages = 0;
+        for (const auto& range : push_constant_ranges_) {
+            push_stages |= range.stageFlags;
+        }
+
         return std::make_shared<Pipeline>(context_.shared_from_this(), graphicsPipeline, pipelineLayout,
-                                          std::move(descriptorSetLayouts), std::move(allBindingTypes));
+                                          std::move(descriptorSetLayouts), std::move(allBindingTypes),
+                                          push_stages, VK_PIPELINE_BIND_POINT_GRAPHICS);
+    }
+
+    // Convenience overload: a RenderTarget already knows its own formats, so the
+    // caller shouldn't have to dig them out. This is what replaces build(renderer).
+    std::expected<std::shared_ptr<Pipeline>, Error> build(const RenderTarget& target) {
+        return build(target.color_format(0), target.depth_format());
     }
 
 private:
@@ -516,7 +551,7 @@ private:
     Context& context_;
     std::shared_ptr<ShaderModule> vertex_shader_;
     std::shared_ptr<ShaderModule> fragment_shader_;
-    std::vector<Format> formats_;
+    std::vector<VertexFormat> formats_;
     bool depth_test_ = false;
     CullMode cull_mode_ = CullMode::BACK;
     FrontFace front_face_ = FrontFace::COUNTER_CLOCKWISE;

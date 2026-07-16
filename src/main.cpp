@@ -15,6 +15,7 @@
 #include "Logger.hpp"
 #include "window.hpp"
 #include "Context.hpp"
+#include "RenderTarget.hpp"
 #include "Renderer.hpp"
 #include "Buffer.hpp"
 #include "ShaderCompiler.hpp"
@@ -24,6 +25,10 @@
 #include "DescriptorSet.hpp"
 
 namespace py = pybind11;
+
+// Renders a command buffer into whatever targets it captured, with no swapchain
+// and no present. This is the headless path — and the one the test suite uses.
+void context_submit(Context& context, std::shared_ptr<CommandBuffer> cmd);
 
 // ── Error boundary ────────────────────────────────────────────────────────────
 //
@@ -186,7 +191,7 @@ std::shared_ptr<Logger> make_default_logger()
 
 }  // namespace
 void SwapchainRenderer::submit(std::shared_ptr<CommandBuffer> cmd) {
-    VkCommandBuffer vkCmd = cmd->get();
+    VkCommandBuffer vkCmd = cmd->get(current_frame());
     vkResetCommandBuffer(vkCmd, 0);
 
     VkCommandBufferBeginInfo beginInfo{
@@ -200,13 +205,56 @@ void SwapchainRenderer::submit(std::shared_ptr<CommandBuffer> cmd) {
         raise_error(*e);
     }
 
-    cmd->execute(vkCmd, *this);
+    cmd->execute(vkCmd, FrameContext{ current_frame() });
 
     if (auto e = check(vkEndCommandBuffer(vkCmd), "record command buffer")) {
         raise_error(*e);
     }
 
     end_frame(vkCmd);
+}
+
+void context_submit(Context& context, std::shared_ptr<CommandBuffer> cmd) {
+    VkCommandBuffer vkCmd = cmd->get(context.current_frame());
+    vkResetCommandBuffer(vkCmd, 0);
+
+    VkCommandBufferBeginInfo beginInfo{
+        .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
+        .pNext = nullptr,
+        .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT,
+        .pInheritanceInfo = nullptr
+    };
+
+    if (auto e = check(vkBeginCommandBuffer(vkCmd, &beginInfo), "begin recording command buffer")) {
+        raise_error(*e);
+    }
+
+    cmd->execute(vkCmd, FrameContext{ context.current_frame() });
+
+    if (auto e = check(vkEndCommandBuffer(vkCmd), "record command buffer")) {
+        raise_error(*e);
+    }
+
+    VkSubmitInfo submitInfo{
+        .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO,
+        .pNext = nullptr,
+        .waitSemaphoreCount = 0,
+        .pWaitSemaphores = nullptr,
+        .pWaitDstStageMask = nullptr,
+        .commandBufferCount = 1,
+        .pCommandBuffers = &vkCmd,
+        .signalSemaphoreCount = 0,
+        .pSignalSemaphores = nullptr
+    };
+
+    if (auto e = check(vkQueueSubmit(context.graphics_queue(), 1, &submitInfo, VK_NULL_HANDLE),
+                       "submit command buffer")) {
+        raise_error(*e);
+    }
+
+    // Blocking. There is no swapchain to pace against here, and 0.5's timeline
+    // semaphores are what make this asynchronous.
+    vkQueueWaitIdle(context.graphics_queue());
 }
 
 
@@ -276,10 +324,10 @@ PYBIND11_MODULE(_core, m) {
         .value("FRAGMENT", ShaderStage::FRAGMENT)
         .export_values();
 
-    py::enum_<Format>(m, "Format")
-        .value("FLOAT2", Format::FLOAT2)
-        .value("FLOAT3", Format::FLOAT3)
-        .value("FLOAT4", Format::FLOAT4)
+    py::enum_<VertexFormat>(m, "VertexFormat")
+        .value("FLOAT2", VertexFormat::FLOAT2)
+        .value("FLOAT3", VertexFormat::FLOAT3)
+        .value("FLOAT4", VertexFormat::FLOAT4)
         .export_values();
 
     py::enum_<CullMode>(m, "CullMode")
@@ -371,10 +419,12 @@ PYBIND11_MODULE(_core, m) {
              py::arg("binding"), py::arg("stage"), py::arg("set"))
         .def("texture", &PipelineBuilder::texture,
              py::arg("binding"), py::arg("stage"), py::arg("set"))
-        .def("build", [](PipelineBuilder& builder, SwapchainRenderer& renderer) -> py::object {
-            auto res = builder.build(renderer.swapchain_format(), renderer.depth_format());
-            return py::cast(unwrap(std::move(res), renderer.context()->logger().get()));
-        }, py::arg("renderer"));
+        // Takes any RenderTarget. A SwapchainRenderer *is* one, so windowed code
+        // reads the same as offscreen code — build(renderer) still works, it just
+        // isn't a special case any more.
+        .def("build", [](PipelineBuilder& builder, std::shared_ptr<RenderTarget> target) -> py::object {
+            return py::cast(unwrap(builder.build(*target), nullptr));
+        }, py::arg("target"));
 
     py::class_<DescriptorSet, std::shared_ptr<DescriptorSet>>(m, "DescriptorSet")
         .def("set_texture", &DescriptorSet::setTexture,
@@ -392,10 +442,17 @@ PYBIND11_MODULE(_core, m) {
 
     py::class_<CommandBuffer, std::shared_ptr<CommandBuffer>>(m, "CommandBuffer")
         .def("begin", &CommandBuffer::begin)
-        .def("begin_rendering", &CommandBuffer::beginRendering, py::arg("clear_color"))
-        .def("end_rendering", &CommandBuffer::endRendering)
-        .def("set_viewport", &CommandBuffer::setViewport)
-        .def("set_scissor", &CommandBuffer::setScissor)
+        // The target is required. begin_rendering() silently meaning "the
+        // swapchain" made presentation a special case disguised as the default.
+        .def("begin_rendering", &CommandBuffer::beginRendering,
+             py::arg("target"), py::arg("clear_color") = std::vector<float>{0.0f, 0.0f, 0.0f, 1.0f})
+        .def("end_rendering", &CommandBuffer::endRendering, py::arg("target"))
+        // The no-argument versions are gone: begin_rendering emits a full-target
+        // viewport and scissor itself. These remain for split-screen and similar.
+        .def("set_viewport", &CommandBuffer::setViewport,
+             py::arg("x"), py::arg("y"), py::arg("width"), py::arg("height"))
+        .def("set_scissor", &CommandBuffer::setScissor,
+             py::arg("x"), py::arg("y"), py::arg("width"), py::arg("height"))
         .def("bind_pipeline", &CommandBuffer::bindPipeline, py::arg("pipeline"))
         .def("bind_vertex_buffer", &CommandBuffer::bindVertexBuffer, py::arg("buffer"))
         .def("bind_index_buffer", &CommandBuffer::bindIndexBuffer, py::arg("buffer"))
@@ -405,9 +462,11 @@ PYBIND11_MODULE(_core, m) {
         .def("draw_indexed_instanced", &CommandBuffer::drawIndexedInstanced,
              py::arg("index_count"), py::arg("instance_count"),
              py::arg("first_index") = 0, py::arg("vertex_offset") = 0)
-        .def("push_constants", [](CommandBuffer& cmd, std::shared_ptr<Pipeline> pipeline, ShaderStage stage, uint32_t offset, std::string_view data) {
-            cmd.pushConstants(pipeline, stage, offset, static_cast<uint32_t>(data.size()), data.data());
-        }, py::arg("pipeline"), py::arg("stage"), py::arg("offset"), py::arg("data"))
+        // No stage argument: the Pipeline already records which stages its push
+        // constant range covers, so repeating it could only ever be wrong.
+        .def("push_constants", [](CommandBuffer& cmd, std::shared_ptr<Pipeline> pipeline, uint32_t offset, std::string_view data) {
+            cmd.pushConstants(pipeline, offset, static_cast<uint32_t>(data.size()), data.data());
+        }, py::arg("pipeline"), py::arg("offset"), py::arg("data"))
         .def("bind_descriptor_set", &CommandBuffer::bindDescriptorSet,
              py::arg("descriptor_set"), py::arg("pipeline"), py::arg("set"));
 
@@ -518,7 +577,11 @@ PYBIND11_MODULE(_core, m) {
                 res = Buffer::create(self, data.data(), count * sizeof(int32_t), type, usage);
             }
 
-            return py::cast(unwrap(std::move(res), self.logger().get()));
+            auto buffer = unwrap(std::move(res), self.logger().get());
+            // Recorded so bindIndexBuffer can pick VK_INDEX_TYPE_UINT16 vs UINT32
+            // instead of assuming.
+            buffer->set_data_type(actualType);
+            return py::cast(buffer);
         }, py::arg("list"), py::arg("type"), py::arg("usage"), py::arg("data_type") = py::none())
         .def("create_buffer", [](Context& self, py::buffer b, BufferType type, MemoryUsage usage) -> py::object {
             py::buffer_info info = b.request();
@@ -543,10 +606,44 @@ PYBIND11_MODULE(_core, m) {
             return py::cast(unwrap(
                 DescriptorPool::create(self, maxSets, samplers, uniformBuffers, storageBuffers),
                 self.logger().get()));
-        }, py::arg("max_sets"), py::arg("samplers") = 0, py::arg("uniform_buffers") = 0, py::arg("storage_buffers") = 0);
+        }, py::arg("max_sets"), py::arg("samplers") = 0, py::arg("uniform_buffers") = 0, py::arg("storage_buffers") = 0)
+        // Command buffers come from the Context, not a renderer: they are a device
+        // resource, and a headless Context has no renderer to ask.
+        .def("create_command_buffer", [](Context& self) -> py::object {
+            return py::cast(unwrap(CommandBuffer::create(self), self.logger().get()));
+        })
+        // The headless counterpart of renderer.submit(): no swapchain, no present.
+        .def("submit", &context_submit, py::arg("cmd"));
+
+    // ── RenderTarget ──
+    py::class_<RenderTarget, std::shared_ptr<RenderTarget>>(m, "RenderTargetBase");
+
+    py::class_<OffscreenTarget, RenderTarget, std::shared_ptr<OffscreenTarget>>(m, "RenderTarget")
+        .def(py::init([](Context& context, std::uint32_t width, std::uint32_t height, bool depth) {
+            return unwrap(OffscreenTarget::create(context, width, height, depth), context.logger().get());
+        }), py::arg("context"), py::arg("width"), py::arg("height"), py::arg("depth") = false)
+        .def_property_readonly("width", [](const OffscreenTarget& t) { return t.extent().width; })
+        .def_property_readonly("height", [](const OffscreenTarget& t) { return t.extent().height; })
+        .def("read_pixels", [](OffscreenTarget& self) -> py::array {
+            auto res = self.read_pixels();
+            if (!res) {
+                raise_error(res.error());
+            }
+            const std::uint32_t h = self.extent().height;
+            const std::uint32_t w = self.extent().width;
+            // Shaped (h, w, 4) so it drops straight into numpy/PIL comparisons —
+            // the whole point of readback is comparing against a golden image.
+            py::array_t<std::uint8_t> out({ static_cast<py::ssize_t>(h),
+                                            static_cast<py::ssize_t>(w),
+                                            static_cast<py::ssize_t>(4) });
+            std::memcpy(out.mutable_data(), res->data(), res->size());
+            return out;
+        });
 
     // ── SwapchainRenderer ──
-    py::class_<SwapchainRenderer, std::shared_ptr<SwapchainRenderer>>(m, "SwapchainRenderer")
+    // Inherits RenderTarget: presenting to a window is one way to consume a
+    // rendered image, not the definition of rendering.
+    py::class_<SwapchainRenderer, RenderTarget, std::shared_ptr<SwapchainRenderer>>(m, "SwapchainRenderer")
         .def(py::init([](Window& window, std::shared_ptr<Context> context) {
             auto sp = window.get_surface_provider();
             return std::shared_ptr<SwapchainRenderer>(
@@ -609,9 +706,8 @@ PYBIND11_MODULE(_core, m) {
         }), py::arg("win32_hwnd"), py::arg("context"))
         .def("begin_frame", &SwapchainRenderer::begin_frame)
         .def("submit", &SwapchainRenderer::submit, py::arg("cmd"))
-        .def("create_command_buffer", [](SwapchainRenderer& self) -> py::object {
-            return py::cast(unwrap(CommandBuffer::create(self), self.context()->logger().get()));
-        });
+        .def_property_readonly("width", [](const SwapchainRenderer& r) { return r.extent().width; })
+        .def_property_readonly("height", [](const SwapchainRenderer& r) { return r.extent().height; });
 
     // ── Key Constants ──
     m.attr("KEY_SPACE") = GLFW_KEY_SPACE;

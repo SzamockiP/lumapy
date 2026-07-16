@@ -424,9 +424,16 @@ public:
 	bool headless() const { return headless_; }
 	bool swapchain_supported() const { return swapchain_supported_; }
 
-	// Frame tracking — updated by the active renderer
+	// Frame tracking — updated by the active renderer.
+	// 0.5 moves this onto a FrameRing driven by Context::begin_frame(), which is
+	// what lets headless/compute-only users advance frames and what lifts the
+	// one-renderer-per-Context restriction below.
 	std::uint32_t current_frame() const { return current_frame_; }
 	void set_current_frame(std::uint32_t frame) { current_frame_ = frame; }
+
+	// Guards against two SwapchainRenderers fighting over current_frame_.
+	bool has_swapchain_renderer() const { return has_swapchain_renderer_; }
+	void set_has_swapchain_renderer(bool value) { has_swapchain_renderer_ = value; }
 
 private:
 	Context(std::shared_ptr<Logger> logger) : logger_(logger) {}
@@ -492,6 +499,7 @@ private:
 
 	std::set<Feature> enabled_features_;
 	bool registered_ = false;
+	bool has_swapchain_renderer_ = false;
 	bool headless_ = false;
 	bool swapchain_supported_ = false;
 	bool dynamic_rendering_khr_ = false;

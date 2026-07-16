@@ -13,6 +13,7 @@
 #include <iostream>
 
 #include "Context.hpp"
+#include "RenderTarget.hpp"
 #include "SurfaceProvider.hpp"
 
 class CommandBuffer;
@@ -75,11 +76,31 @@ inline VkExtent2D choose_swap_extent(const VkSurfaceCapabilitiesKHR& capabilitie
 	}
 }
 
-class SwapchainRenderer
+class SwapchainRenderer : public RenderTarget
 {
 public:
 	static std::expected<std::unique_ptr<SwapchainRenderer>, Error> create(std::shared_ptr<Context> context, SurfaceProvider surface_provider)
 	{
+		if (!context->swapchain_supported())
+		{
+			return std::unexpected(err_window(
+				"Vulkan: this Context has no swapchain support, so it cannot present. "
+				"Render to a bazalt.RenderTarget instead, or check ctx.headless."));
+		}
+
+		// The frame index lives on the Context and is advanced by whichever renderer
+		// ends a frame, so two renderers sharing a Context silently corrupt each
+		// other's in-flight tracking. Say so instead of misrendering.
+		// 0.5 moves the ring onto Context::begin_frame(), which is the real fix and
+		// is what lets this restriction be lifted in 0.6.
+		if (context->has_swapchain_renderer())
+		{
+			return std::unexpected(err_window(
+				"This Context already has a SwapchainRenderer. Two renderers sharing "
+				"one Context would corrupt each other's frame index. Multi-window "
+				"support is planned once frame tracking moves off the Context."));
+		}
+
 		auto renderer = std::unique_ptr<SwapchainRenderer>(new SwapchainRenderer(context, std::move(surface_provider)));
 
 		// Surface — created via the SurfaceProvider callback
@@ -206,11 +227,17 @@ public:
 			return std::unexpected(*e);
 		}
 
+		context->set_has_swapchain_renderer(true);
 		return renderer;
 	}
 
 	~SwapchainRenderer()
 	{
+		if (context_)
+		{
+			context_->set_has_swapchain_renderer(false);
+		}
+
 		if (context_->device())
 		{
 			vkDeviceWaitIdle(context_->device());
@@ -258,9 +285,24 @@ public:
 	VkExtent2D swapchain_extent() const { return swapchain_extent_; }
 	const std::vector<VkImage>& swapchain_images() const { return swapchain_images_; }
 	const std::vector<VkImageView>& swapchain_image_views() const { return swapchain_image_views_; }
-	VkFormat depth_format() const { return depth_format_; }
-	VkImage depth_image() const { return depth_image_; }
+	VkImage depth_image() const override { return depth_image_; }
 	VkImageView depth_image_view() const { return depth_image_view_; }
+
+	// ── RenderTarget ──────────────────────────────────────────────────────────
+	//
+	// A swapchain hands out a different image each frame, which is exactly why
+	// these are resolved at replay time rather than baked in when recording.
+
+	std::uint32_t color_count() const override { return 1; }
+	VkImage color_image(std::uint32_t) const override { return swapchain_images_[image_index_]; }
+	VkImageView color_view(std::uint32_t) const override { return swapchain_image_views_[image_index_]; }
+	VkFormat color_format(std::uint32_t) const override { return swapchain_format_; }
+	VkImageView depth_view() const override { return depth_image_view_; }
+	VkFormat depth_format() const override { return depth_format_; }
+	VkExtent2D extent() const override { return swapchain_extent_; }
+
+	// The one line that used to be hardcoded inside every end_rendering.
+	VkImageLayout final_layout() const override { return VK_IMAGE_LAYOUT_PRESENT_SRC_KHR; }
 
 	std::uint32_t current_frame() const { return context_->current_frame(); }
 	std::uint32_t current_image_index() const { return image_index_; }

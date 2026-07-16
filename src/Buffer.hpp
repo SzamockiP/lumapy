@@ -36,12 +36,25 @@ public:
     virtual size_t size() const = 0;
     virtual bool is_dynamic() const { return false; }
     virtual VkBuffer get_for_frame(uint32_t /*frame*/) const { return get(); }
-    
+
     virtual void update(const void* data, size_t size) {
         throw std::runtime_error("Update not supported for this buffer type");
     }
 
+    // Remembered so bindIndexBuffer doesn't have to assume. It used to hardcode
+    // VK_INDEX_TYPE_UINT32 while create_buffer happily accepted UINT16 indices,
+    // which were then read back at half the count with no error.
+    DataType data_type() const { return data_type_; }
+    void set_data_type(DataType type) { data_type_ = type; }
+
+    VkIndexType index_type() const {
+        return data_type_ == DataType::UINT16 ? VK_INDEX_TYPE_UINT16 : VK_INDEX_TYPE_UINT32;
+    }
+
     static std::expected<std::shared_ptr<Buffer>, Error> create(Context& context, const void* data, size_t data_size, BufferType type, MemoryUsage usage);
+
+protected:
+    DataType data_type_ = DataType::FLOAT;
 };
 
 class StaticBuffer : public Buffer {

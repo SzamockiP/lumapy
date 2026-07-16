@@ -3,9 +3,12 @@
 from bazalt._core import *  # noqa: F401, F403
 from bazalt._core import (  # noqa: F401 — explicit re-exports for IDE visibility
     Context,
+    RenderTarget,
+    RenderTargetBase,
     SwapchainRenderer,
     Window,
     Logger,
+    LogMessage,
     Buffer,
     ShaderModule,
     Texture,
@@ -18,20 +21,33 @@ from bazalt._core import (  # noqa: F401 — explicit re-exports for IDE visibil
     BufferType,
     DataType,
     ShaderStage,
-    Format,
+    VertexFormat,
     CullMode,
     FrontFace,
     MemoryUsage,
+    Severity,
+    Source,
+    Feature,
+    BazaltError,
+    InitializationError,
+    DeviceLostError,
+    OutOfMemoryError,
+    ShaderError,
+    WindowError,
+    ResourceError,
 )
 
-__version__ = "0.3.0"
+__version__ = "0.4.0.dev0"
 
 __all__ = [
     # Core
     "Context",
+    "RenderTarget",
+    "RenderTargetBase",
     "SwapchainRenderer",
     "Window",
     "Logger",
+    "LogMessage",
     # Resources
     "Buffer",
     "ShaderModule",
@@ -46,10 +62,21 @@ __all__ = [
     "BufferType",
     "DataType",
     "ShaderStage",
-    "Format",
+    "VertexFormat",
     "CullMode",
     "FrontFace",
     "MemoryUsage",
+    "Severity",
+    "Source",
+    "Feature",
+    # Errors — the type is the recoverability contract
+    "BazaltError",
+    "InitializationError",
+    "DeviceLostError",
+    "OutOfMemoryError",
+    "ShaderError",
+    "WindowError",
+    "ResourceError",
     # Version
     "__version__",
 ]

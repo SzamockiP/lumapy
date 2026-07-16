@@ -5,16 +5,26 @@
 #include <array>
 #include <expected>
 #include <functional>
-#include "Renderer.hpp"
+#include "Context.hpp"
+#include "RenderTarget.hpp"
 #include "Pipeline.hpp"
 #include "Buffer.hpp"
 #include "Texture.hpp"
 #include "DescriptorSet.hpp"
 
+// Records commands once and replays them every submit.
+//
+// The recorded lambdas take a FrameContext rather than a SwapchainRenderer&.
+// That single change is what lets the same command buffer be replayed against a
+// window, an offscreen image, or (later) a compute-only submit: this file no
+// longer knows that swapchains exist.
 class CommandBuffer {
 public:
-    static std::expected<std::shared_ptr<CommandBuffer>, Error> create(SwapchainRenderer& renderer) {
-        auto ctx = renderer.context();
+    // Takes a Context, not a renderer: command buffers are a device resource and
+    // have nothing to do with presentation. This is what lets a headless Context
+    // with no renderer at all record commands.
+    static std::expected<std::shared_ptr<CommandBuffer>, Error> create(Context& context) {
+        auto ctx = context.shared_from_this();
         auto cmd = std::shared_ptr<CommandBuffer>(new CommandBuffer(ctx));
 
         VkCommandBufferAllocateInfo allocInfo{
@@ -35,7 +45,7 @@ public:
 
     ~CommandBuffer() {
         if (context_) {
-            vkFreeCommandBuffers(context_->device(), context_->command_pool(), 
+            vkFreeCommandBuffers(context_->device(), context_->command_pool(),
                                  Context::MAX_FRAMES_IN_FLIGHT, command_buffers_.data());
         }
     }
@@ -47,12 +57,19 @@ public:
         commands_.clear();
     }
 
-    void beginRendering(const std::vector<float>& clear_color) {
+    // The target is explicit. It used to default to "the swapchain" implicitly,
+    // which made presentation a special case dressed up as the default and left
+    // no way to name anything else. Naming what you draw into costs one token
+    // and buys one rule that holds everywhere.
+    void beginRendering(std::shared_ptr<RenderTarget> target, const std::vector<float>& clear_color) {
         std::array<float, 4> cc = {0.0f, 0.0f, 0.0f, 1.0f};
         if (clear_color.size() >= 4) {
             cc[0] = clear_color[0]; cc[1] = clear_color[1]; cc[2] = clear_color[2]; cc[3] = clear_color[3];
         }
-        commands_.push_back([cc](VkCommandBuffer cmd, SwapchainRenderer& renderer) {
+
+        commands_.push_back([cc, target](VkCommandBuffer cmd, const FrameContext& frame) {
+            RenderTarget* rt = target.get();
+
             VkImageMemoryBarrier barrier{
                 .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
                 .pNext = nullptr,
@@ -62,7 +79,7 @@ public:
                 .newLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
                 .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
                 .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
-                .image = renderer.swapchain_images()[renderer.current_image_index()],
+                .image = rt->color_image(0),
                 .subresourceRange = {
                     .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
                     .baseMipLevel = 0,
@@ -75,13 +92,10 @@ public:
             vkCmdPipelineBarrier(
                 cmd,
                 VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
-                0,
-                0, nullptr,
-                0, nullptr,
-                1, &barrier
+                0, 0, nullptr, 0, nullptr, 1, &barrier
             );
 
-            if (renderer.depth_image() != VK_NULL_HANDLE) {
+            if (rt->depth_image() != VK_NULL_HANDLE) {
                 VkImageMemoryBarrier depthBarrier{
                     .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
                     .pNext = nullptr,
@@ -91,7 +105,7 @@ public:
                     .newLayout = VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL,
                     .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
                     .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
-                    .image = renderer.depth_image(),
+                    .image = rt->depth_image(),
                     .subresourceRange = {
                         .aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT,
                         .baseMipLevel = 0,
@@ -104,17 +118,14 @@ public:
                 vkCmdPipelineBarrier(
                     cmd,
                     VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT,
-                    0,
-                    0, nullptr,
-                    0, nullptr,
-                    1, &depthBarrier
+                    0, 0, nullptr, 0, nullptr, 1, &depthBarrier
                 );
             }
 
             VkRenderingAttachmentInfo colorAttachment{
                 .sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO,
                 .pNext = nullptr,
-                .imageView = renderer.swapchain_image_views()[renderer.current_image_index()],
+                .imageView = rt->color_view(0),
                 .imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
                 .resolveMode = VK_RESOLVE_MODE_NONE,
                 .resolveImageView = VK_NULL_HANDLE,
@@ -127,7 +138,7 @@ public:
             VkRenderingAttachmentInfo depthAttachment{
                 .sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO,
                 .pNext = nullptr,
-                .imageView = renderer.depth_image_view(),
+                .imageView = rt->depth_view(),
                 .imageLayout = VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL,
                 .resolveMode = VK_RESOLVE_MODE_NONE,
                 .resolveImageView = VK_NULL_HANDLE,
@@ -141,21 +152,38 @@ public:
                 .sType = VK_STRUCTURE_TYPE_RENDERING_INFO,
                 .pNext = nullptr,
                 .flags = 0,
-                .renderArea = { {0, 0}, renderer.swapchain_extent() },
+                .renderArea = { {0, 0}, rt->extent() },
                 .layerCount = 1,
                 .viewMask = 0,
                 .colorAttachmentCount = 1,
                 .pColorAttachments = &colorAttachment,
-                .pDepthAttachment = renderer.depth_image_view() != VK_NULL_HANDLE ? &depthAttachment : nullptr,
+                .pDepthAttachment = rt->depth_view() != VK_NULL_HANDLE ? &depthAttachment : nullptr,
                 .pStencilAttachment = nullptr
             };
 
             vkCmdBeginRendering(cmd, &renderingInfo);
+
+            // Emitted automatically: set_viewport()/set_scissor() took no arguments
+            // and silently read the swapchain, which is magic — just less legible
+            // than doing it here. set_viewport(x, y, w, h) remains for the cases
+            // that genuinely want something other than the whole target.
+            VkViewport viewport{
+                .x = 0.0f,
+                .y = 0.0f,
+                .width = static_cast<float>(rt->extent().width),
+                .height = static_cast<float>(rt->extent().height),
+                .minDepth = 0.0f,
+                .maxDepth = 1.0f
+            };
+            vkCmdSetViewport(cmd, 0, 1, &viewport);
+
+            VkRect2D scissor{ .offset = {0, 0}, .extent = rt->extent() };
+            vkCmdSetScissor(cmd, 0, 1, &scissor);
         });
     }
 
-    void endRendering() {
-        commands_.push_back([](VkCommandBuffer cmd, SwapchainRenderer& renderer) {
+    void endRendering(std::shared_ptr<RenderTarget> target) {
+        commands_.push_back([target](VkCommandBuffer cmd, const FrameContext& frame) {
             vkCmdEndRendering(cmd);
 
             VkImageMemoryBarrier barrier{
@@ -164,10 +192,12 @@ public:
                 .srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
                 .dstAccessMask = 0,
                 .oldLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
-                .newLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR,
+                // Was VK_IMAGE_LAYOUT_PRESENT_SRC_KHR, unconditionally. That one
+                // constant is why nothing but a swapchain could ever be drawn into.
+                .newLayout = target->final_layout(),
                 .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
                 .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
-                .image = renderer.swapchain_images()[renderer.current_image_index()],
+                .image = target->color_image(0),
                 .subresourceRange = {
                     .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
                     .baseMipLevel = 0,
@@ -180,46 +210,38 @@ public:
             vkCmdPipelineBarrier(
                 cmd,
                 VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
-                0,
-                0, nullptr,
-                0, nullptr,
-                1, &barrier
+                0, 0, nullptr, 0, nullptr, 1, &barrier
             );
         });
     }
 
-    void setViewport() {
-        commands_.push_back([](VkCommandBuffer cmd, SwapchainRenderer& renderer) {
+    // Explicit override for split-screen and similar. The no-argument version is
+    // gone: begin_rendering already covers the whole-target case.
+    void setViewport(float x, float y, float width, float height) {
+        commands_.push_back([x, y, width, height](VkCommandBuffer cmd, const FrameContext&) {
             VkViewport viewport{
-                .x = 0.0f,
-                .y = 0.0f,
-                .width = static_cast<float>(renderer.swapchain_extent().width),
-                .height = static_cast<float>(renderer.swapchain_extent().height),
-                .minDepth = 0.0f,
-                .maxDepth = 1.0f
+                .x = x, .y = y, .width = width, .height = height,
+                .minDepth = 0.0f, .maxDepth = 1.0f
             };
             vkCmdSetViewport(cmd, 0, 1, &viewport);
         });
     }
 
-    void setScissor() {
-        commands_.push_back([](VkCommandBuffer cmd, SwapchainRenderer& renderer) {
-            VkRect2D scissor{
-                .offset = {0, 0},
-                .extent = renderer.swapchain_extent()
-            };
+    void setScissor(std::int32_t x, std::int32_t y, std::uint32_t width, std::uint32_t height) {
+        commands_.push_back([x, y, width, height](VkCommandBuffer cmd, const FrameContext&) {
+            VkRect2D scissor{ .offset = {x, y}, .extent = {width, height} };
             vkCmdSetScissor(cmd, 0, 1, &scissor);
         });
     }
 
     void bindPipeline(std::shared_ptr<Pipeline> pipeline) {
-        commands_.push_back([pipeline](VkCommandBuffer cmd, SwapchainRenderer& renderer) {
-            vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline->get());
+        commands_.push_back([pipeline](VkCommandBuffer cmd, const FrameContext&) {
+            vkCmdBindPipeline(cmd, pipeline->bind_point(), pipeline->get());
         });
     }
 
     void bindVertexBuffer(std::shared_ptr<Buffer> buffer) {
-        commands_.push_back([buffer](VkCommandBuffer cmd, SwapchainRenderer& renderer) {
+        commands_.push_back([buffer](VkCommandBuffer cmd, const FrameContext&) {
             VkBuffer vertexBuffers[] = {buffer->get()};
             VkDeviceSize offsets[] = {0};
             vkCmdBindVertexBuffers(cmd, 0, 1, vertexBuffers, offsets);
@@ -227,54 +249,58 @@ public:
     }
 
     void bindIndexBuffer(std::shared_ptr<Buffer> buffer) {
-        commands_.push_back([buffer](VkCommandBuffer cmd, SwapchainRenderer& renderer) {
-            vkCmdBindIndexBuffer(cmd, buffer->get(), 0, VK_INDEX_TYPE_UINT32);
+        commands_.push_back([buffer](VkCommandBuffer cmd, const FrameContext&) {
+            // Derived from the buffer rather than hardcoded to UINT32: create_buffer
+            // accepts UINT16 indices, which used to be read back at half count.
+            vkCmdBindIndexBuffer(cmd, buffer->get(), 0, buffer->index_type());
         });
     }
 
     void draw(uint32_t vertexCount) {
-        commands_.push_back([vertexCount](VkCommandBuffer cmd, SwapchainRenderer& renderer) {
+        commands_.push_back([vertexCount](VkCommandBuffer cmd, const FrameContext&) {
             vkCmdDraw(cmd, vertexCount, 1, 0, 0);
         });
     }
 
     void drawIndexed(uint32_t indexCount, uint32_t firstIndex = 0, int32_t vertexOffset = 0) {
-        commands_.push_back([indexCount, firstIndex, vertexOffset](VkCommandBuffer cmd, SwapchainRenderer& renderer) {
+        commands_.push_back([indexCount, firstIndex, vertexOffset](VkCommandBuffer cmd, const FrameContext&) {
             vkCmdDrawIndexed(cmd, indexCount, 1, firstIndex, vertexOffset, 0);
         });
     }
 
     void drawIndexedInstanced(uint32_t indexCount, uint32_t instanceCount, uint32_t firstIndex = 0, int32_t vertexOffset = 0) {
-        commands_.push_back([indexCount, instanceCount, firstIndex, vertexOffset](VkCommandBuffer cmd, SwapchainRenderer& renderer) {
+        commands_.push_back([indexCount, instanceCount, firstIndex, vertexOffset](VkCommandBuffer cmd, const FrameContext&) {
             vkCmdDrawIndexed(cmd, indexCount, instanceCount, firstIndex, vertexOffset, 0);
         });
     }
 
-    void pushConstants(std::shared_ptr<Pipeline> pipeline, ShaderStage stage, uint32_t offset, uint32_t size, const void* data) {
+    // No stage argument: the Pipeline already knows which stages its push constant
+    // range covers, so passing a mismatched one was a validation error for no gain.
+    void pushConstants(std::shared_ptr<Pipeline> pipeline, uint32_t offset, uint32_t size, const void* data) {
         std::vector<uint8_t> buffer(static_cast<const uint8_t*>(data), static_cast<const uint8_t*>(data) + size);
-        commands_.push_back([pipeline, stage, offset, size, buffer](VkCommandBuffer cmd, SwapchainRenderer& renderer) {
-            VkShaderStageFlags stageFlags = static_cast<VkShaderStageFlags>(to_vk(stage));
-            vkCmdPushConstants(cmd, pipeline->layout(), stageFlags, offset, size, buffer.data());
+        commands_.push_back([pipeline, offset, size, buffer](VkCommandBuffer cmd, const FrameContext&) {
+            vkCmdPushConstants(cmd, pipeline->layout(), pipeline->push_constant_stages(),
+                               offset, size, buffer.data());
         });
     }
 
     void bindDescriptorSet(std::shared_ptr<DescriptorSet> descSet,
                            std::shared_ptr<Pipeline> pipeline,
                            uint32_t setIndex) {
-        commands_.push_back([descSet, pipeline, setIndex](VkCommandBuffer cmd, SwapchainRenderer& renderer) {
-            VkDescriptorSet set = descSet->get(renderer.current_frame());
-            vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
+        commands_.push_back([descSet, pipeline, setIndex](VkCommandBuffer cmd, const FrameContext& frame) {
+            VkDescriptorSet set = descSet->get(frame.frame_index);
+            vkCmdBindDescriptorSets(cmd, pipeline->bind_point(),
                 pipeline->layout(), setIndex, 1, &set, 0, nullptr);
         });
     }
 
-    VkCommandBuffer get() const { 
-        return command_buffers_[context_->current_frame()]; 
+    VkCommandBuffer get(std::uint32_t frame_index) const {
+        return command_buffers_[frame_index];
     }
 
-    void execute(VkCommandBuffer vkCmd, SwapchainRenderer& renderer) {
+    void execute(VkCommandBuffer vkCmd, const FrameContext& frame) {
         for (auto& cmd_func : commands_) {
-            cmd_func(vkCmd, renderer);
+            cmd_func(vkCmd, frame);
         }
     }
 
@@ -283,5 +309,5 @@ private:
 
     std::shared_ptr<Context> context_;
     std::array<VkCommandBuffer, Context::MAX_FRAMES_IN_FLIGHT> command_buffers_{};
-    std::vector<std::function<void(VkCommandBuffer, SwapchainRenderer&)>> commands_;
+    std::vector<std::function<void(VkCommandBuffer, const FrameContext&)>> commands_;
 };
