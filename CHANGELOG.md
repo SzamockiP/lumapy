@@ -79,3 +79,46 @@ The "Foundations" release: three interdependent pillars, API breaks batched.
 - Non-contiguous numpy arrays now raise `ResourceError` instead of
   silently uploading garbage.
 - `RuntimeError` replaced by the `BazaltError` hierarchy at the API boundary.
+
+## [0.3.0] — 2026-07-15
+
+### Added
+- `MemoryUsage` enum: `STATIC` (GPU-local) and `DYNAMIC` (host-visible,
+  multi-buffered, updatable per frame) for explicit control over resource
+  memory strategy.
+- Keyword arguments on all Python bindings plus `_core.pyi` stubs — IDE
+  autocompletion and type hints.
+
+### Changed
+- Core Vulkan environment (`Context`) separated from presentation
+  (`SwapchainRenderer`): the GPU can be initialised and shaders compiled
+  without creating any window.
+- Swapchain creation reimplemented on raw Vulkan calls instead of
+  vk-bootstrap, so a window can be attached after `Context` creation and
+  swapchain recreation is robust.
+
+### Fixed
+- Vulkan teardown crashes during Python garbage collection: resource
+  objects (`Buffer`, `Texture`, `Pipeline`, …) now keep the `Context`
+  alive via `std::shared_ptr`.
+
+## [0.2.0] — 2026-07-13
+
+### Added
+- Native OS window integration via `win32_hwnd` (embedding in PyQt/PySide).
+
+### Changed
+- Renderer decoupled from GLFW windowing.
+- `Logger` extracted into a standalone module.
+
+## [0.1.0] — 2026-07-08
+
+### Added
+- `DescriptorPool` and `DescriptorSet` API for custom descriptor
+  management.
+- More examples and expanded README documentation.
+
+## [0.0.1] — 2026-07-06
+
+Initial preview release: window with event handling, threaded logging
+system, and basic shader prototyping.
