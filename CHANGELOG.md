@@ -5,10 +5,12 @@ All notable changes to **bazalt** are documented here. The format follows
 [SemVer](https://semver.org/) (pre-1.0: minor versions may break the API,
 patch versions never do).
 
-## [Unreleased] — 0.4.1
+## [0.4.1] — 2026-07-17
 
 A source-quality release: bug fixes, refactoring, and C++23 adoption.
-No public Python API changes.
+No public Python API changes (one behavioural fix: `read_pixels()` on a
+never-rendered target now raises `ResourceError` instead of returning
+undefined VRAM contents).
 
 ### Fixed
 - `read_pixels()` could return discarded content: the internal "has been
