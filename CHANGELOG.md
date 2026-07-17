@@ -5,6 +5,28 @@ All notable changes to **bazalt** are documented here. The format follows
 [SemVer](https://semver.org/) (pre-1.0: minor versions may break the API,
 patch versions never do).
 
+## [0.4.2] — 2026-07-18
+
+A hotfix for fragment shaders that use `discard` on Vulkan 1.3.
+
+### Fixed
+- Fragment shaders using `discard` triggered a
+  `vkCreateShaderModule` validation error (`SPIR-V Capability
+  DemoteToHelperInvocation was declared…`) and a massive frame-rate
+  collapse on Vulkan 1.3 devices (example 07 dropped from ~350 FPS to
+  ~2 FPS). When shaders are compiled for SPIR-V 1.6, glslang translates
+  `discard` into `OpDemoteToHelperInvocation`/`OpTerminateInvocation`,
+  but the device was created without the matching
+  `shaderDemoteToHelperInvocation`/`shaderTerminateInvocation` features.
+  Both are mandatory in Vulkan 1.3 and are now enabled on the core-1.3
+  path.
+- `Context.api_version()` reported the raw device version instead of the
+  negotiated one: a 1.3-capable GPU behind a 1.2 loader takes the
+  1.2 + `VK_KHR_dynamic_rendering` path, yet shaders were still compiled
+  targeting SPIR-V for Vulkan 1.3, which such a device can reject. The
+  shader target now follows the version the device was actually created
+  against.
+
 ## [0.4.1] — 2026-07-17
 
 A source-quality release: bug fixes, refactoring, and C++23 adoption.
