@@ -8,6 +8,7 @@
 
 #include "stb_image.h"
 #include "Context.hpp"
+#include "ImmediateSubmit.hpp"
 
 class Texture {
 public:
@@ -78,7 +79,12 @@ public:
         }
 
         void* mappedData;
-        vmaMapMemory(context.allocator(), stagingAllocation, &mappedData);
+        if (auto e = check(vmaMapMemory(context.allocator(), stagingAllocation, &mappedData),
+                           "map staging buffer memory for texture", ErrorCode::Resource)) {
+            stbi_image_free(pixels);
+            vmaDestroyBuffer(context.allocator(), stagingBuffer, stagingAllocation);
+            return std::unexpected(*e);
+        }
         std::memcpy(mappedData, pixels, static_cast<size_t>(imageSize));
         vmaUnmapMemory(context.allocator(), stagingAllocation);
 
@@ -114,74 +120,39 @@ public:
             return std::unexpected(*e);
         }
 
-        // Record layout transitions + copy in a one-shot command buffer
-        VkCommandBufferAllocateInfo cmdAllocInfo{
-            .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
-            .pNext = nullptr,
-            .commandPool = context.command_pool(),
-            .level = VK_COMMAND_BUFFER_LEVEL_PRIMARY,
-            .commandBufferCount = 1
-        };
+        // Layout transitions + copy in a one-shot submit.
+        auto submitted = immediate_submit(context, [&](VkCommandBuffer cmd) {
+            transition_image_layout(cmd, image,
+                VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                0, VK_ACCESS_TRANSFER_WRITE_BIT,
+                VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT);
 
-        VkCommandBuffer cmd;
-        vkAllocateCommandBuffers(context.device(), &cmdAllocInfo, &cmd);
+            VkBufferImageCopy region{
+                .bufferOffset = 0,
+                .bufferRowLength = 0,
+                .bufferImageHeight = 0,
+                .imageSubresource = {
+                    .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
+                    .mipLevel = 0,
+                    .baseArrayLayer = 0,
+                    .layerCount = 1
+                },
+                .imageOffset = {0, 0, 0},
+                .imageExtent = {static_cast<uint32_t>(width), static_cast<uint32_t>(height), 1}
+            };
+            vkCmdCopyBufferToImage(cmd, stagingBuffer, image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
 
-        VkCommandBufferBeginInfo beginInfo{
-            .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
-            .pNext = nullptr,
-            .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT,
-            .pInheritanceInfo = nullptr
-        };
-        vkBeginCommandBuffer(cmd, &beginInfo);
+            transition_image_layout(cmd, image,
+                VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT,
+                VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT);
+        });
 
-        // Transition: UNDEFINED → TRANSFER_DST_OPTIMAL
-        transition_image_layout(cmd, image,
-            VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-            0, VK_ACCESS_TRANSFER_WRITE_BIT,
-            VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT);
-
-        // Copy staging buffer → image
-        VkBufferImageCopy region{
-            .bufferOffset = 0,
-            .bufferRowLength = 0,
-            .bufferImageHeight = 0,
-            .imageSubresource = {
-                .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
-                .mipLevel = 0,
-                .baseArrayLayer = 0,
-                .layerCount = 1
-            },
-            .imageOffset = {0, 0, 0},
-            .imageExtent = {static_cast<uint32_t>(width), static_cast<uint32_t>(height), 1}
-        };
-
-        vkCmdCopyBufferToImage(cmd, stagingBuffer, image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
-
-        // Transition: TRANSFER_DST_OPTIMAL → SHADER_READ_ONLY_OPTIMAL
-        transition_image_layout(cmd, image,
-            VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
-            VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT,
-            VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT);
-
-        vkEndCommandBuffer(cmd);
-
-        VkSubmitInfo submitInfo{
-            .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO,
-            .pNext = nullptr,
-            .waitSemaphoreCount = 0,
-            .pWaitSemaphores = nullptr,
-            .pWaitDstStageMask = nullptr,
-            .commandBufferCount = 1,
-            .pCommandBuffers = &cmd,
-            .signalSemaphoreCount = 0,
-            .pSignalSemaphores = nullptr
-        };
-
-        vkQueueSubmit(context.graphics_queue(), 1, &submitInfo, VK_NULL_HANDLE);
-        vkQueueWaitIdle(context.graphics_queue());
-
-        vkFreeCommandBuffers(context.device(), context.command_pool(), 1, &cmd);
         vmaDestroyBuffer(context.allocator(), stagingBuffer, stagingAllocation);
+        if (!submitted) {
+            vmaDestroyImage(context.allocator(), image, allocation);
+            return std::unexpected(submitted.error());
+        }
 
         // Create ImageView
         VkImageViewCreateInfo viewInfo{

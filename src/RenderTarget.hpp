@@ -9,6 +9,7 @@
 
 #include "Context.hpp"
 #include "Error.hpp"
+#include "ImmediateSubmit.hpp"
 
 // Anything that can be drawn into.
 //
@@ -205,65 +206,37 @@ public:
 			return std::unexpected(*e);
 		}
 
-		VkCommandBufferAllocateInfo cmdInfo{
-			.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
-			.pNext = nullptr,
-			.commandPool = context_->command_pool(),
-			.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY,
-			.commandBufferCount = 1
-		};
-		VkCommandBuffer cmd = VK_NULL_HANDLE;
-		if (auto e = check(vkAllocateCommandBuffers(context_->device(), &cmdInfo, &cmd),
-		                   "allocate readback command buffer", ErrorCode::Resource))
+		auto submitted = immediate_submit(*context_, [&](VkCommandBuffer cmd) {
+			// The image is in final_layout() after rendering; move it to TRANSFER_SRC
+			// and back so the target stays usable for sampling afterwards.
+			transition(cmd, final_layout(), VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
+
+			VkBufferImageCopy region{
+				.bufferOffset = 0,
+				.bufferRowLength = 0,
+				.bufferImageHeight = 0,
+				.imageSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 },
+				.imageOffset = { 0, 0, 0 },
+				.imageExtent = { extent_.width, extent_.height, 1 }
+			};
+			vkCmdCopyImageToBuffer(cmd, color_image_, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, staging, 1, &region);
+
+			transition(cmd, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, final_layout());
+		});
+		if (!submitted)
+		{
+			vmaDestroyBuffer(context_->allocator(), staging, staging_alloc);
+			return std::unexpected(submitted.error());
+		}
+
+		std::vector<std::uint8_t> pixels(static_cast<size_t>(size));
+		void* mapped = nullptr;
+		if (auto e = check(vmaMapMemory(context_->allocator(), staging_alloc, &mapped),
+		                   "map readback buffer memory", ErrorCode::Resource))
 		{
 			vmaDestroyBuffer(context_->allocator(), staging, staging_alloc);
 			return std::unexpected(*e);
 		}
-
-		VkCommandBufferBeginInfo beginInfo{
-			.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
-			.pNext = nullptr,
-			.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT,
-			.pInheritanceInfo = nullptr
-		};
-		vkBeginCommandBuffer(cmd, &beginInfo);
-
-		// The image is in final_layout() after rendering; move it to TRANSFER_SRC
-		// and back so the target stays usable for sampling afterwards.
-		transition(cmd, final_layout(), VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
-
-		VkBufferImageCopy region{
-			.bufferOffset = 0,
-			.bufferRowLength = 0,
-			.bufferImageHeight = 0,
-			.imageSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 },
-			.imageOffset = { 0, 0, 0 },
-			.imageExtent = { extent_.width, extent_.height, 1 }
-		};
-		vkCmdCopyImageToBuffer(cmd, color_image_, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, staging, 1, &region);
-
-		transition(cmd, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, final_layout());
-
-		vkEndCommandBuffer(cmd);
-
-		VkSubmitInfo submitInfo{
-			.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO,
-			.pNext = nullptr,
-			.waitSemaphoreCount = 0,
-			.pWaitSemaphores = nullptr,
-			.pWaitDstStageMask = nullptr,
-			.commandBufferCount = 1,
-			.pCommandBuffers = &cmd,
-			.signalSemaphoreCount = 0,
-			.pSignalSemaphores = nullptr
-		};
-		vkQueueSubmit(context_->graphics_queue(), 1, &submitInfo, VK_NULL_HANDLE);
-		vkQueueWaitIdle(context_->graphics_queue());
-		vkFreeCommandBuffers(context_->device(), context_->command_pool(), 1, &cmd);
-
-		std::vector<std::uint8_t> pixels(static_cast<size_t>(size));
-		void* mapped = nullptr;
-		vmaMapMemory(context_->allocator(), staging_alloc, &mapped);
 		std::memcpy(pixels.data(), mapped, static_cast<size_t>(size));
 		vmaUnmapMemory(context_->allocator(), staging_alloc);
 		vmaDestroyBuffer(context_->allocator(), staging, staging_alloc);

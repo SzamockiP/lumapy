@@ -81,6 +81,7 @@ add_library(_core MODULE
     src/DescriptorSet.hpp
     src/Error.hpp
     src/Features.hpp
+    src/ImmediateSubmit.hpp
     src/Logger.hpp
     src/MpscQueue.hpp
     src/Pipeline.hpp

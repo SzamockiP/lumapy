@@ -8,6 +8,7 @@
 #include <cstring>
 #include <array>
 #include "Context.hpp"
+#include "ImmediateSubmit.hpp"
 
 enum class BufferType {
     VERTEX,
@@ -109,7 +110,11 @@ public:
 
         if (data != nullptr && data_size > 0) {
             void* mappedData;
-            vmaMapMemory(context.allocator(), stagingAllocation, &mappedData);
+            if (auto e = check(vmaMapMemory(context.allocator(), stagingAllocation, &mappedData),
+                               "map staging buffer memory", ErrorCode::Resource)) {
+                vmaDestroyBuffer(context.allocator(), stagingBuffer, stagingAllocation);
+                return std::unexpected(*e);
+            }
             std::memcpy(mappedData, data, data_size);
             vmaUnmapMemory(context.allocator(), stagingAllocation);
         }
@@ -136,52 +141,20 @@ public:
             return std::unexpected(*e);
         }
 
-        VkCommandBufferAllocateInfo allocCmdInfo{
-            .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
-            .pNext = nullptr,
-            .commandPool = context.command_pool(),
-            .level = VK_COMMAND_BUFFER_LEVEL_PRIMARY,
-            .commandBufferCount = 1
-        };
+        auto submitted = immediate_submit(context, [&](VkCommandBuffer cmd) {
+            VkBufferCopy copyRegion{
+                .srcOffset = 0,
+                .dstOffset = 0,
+                .size = data_size
+            };
+            vkCmdCopyBuffer(cmd, stagingBuffer, buffer, 1, &copyRegion);
+        });
 
-        VkCommandBuffer commandBuffer;
-        vkAllocateCommandBuffers(context.device(), &allocCmdInfo, &commandBuffer);
-
-        VkCommandBufferBeginInfo beginInfo{
-            .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
-            .pNext = nullptr,
-            .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT,
-            .pInheritanceInfo = nullptr
-        };
-
-        vkBeginCommandBuffer(commandBuffer, &beginInfo);
-
-        VkBufferCopy copyRegion{
-            .srcOffset = 0,
-            .dstOffset = 0,
-            .size = data_size
-        };
-        vkCmdCopyBuffer(commandBuffer, stagingBuffer, buffer, 1, &copyRegion);
-
-        vkEndCommandBuffer(commandBuffer);
-
-        VkSubmitInfo submitInfo{
-            .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO,
-            .pNext = nullptr,
-            .waitSemaphoreCount = 0,
-            .pWaitSemaphores = nullptr,
-            .pWaitDstStageMask = nullptr,
-            .commandBufferCount = 1,
-            .pCommandBuffers = &commandBuffer,
-            .signalSemaphoreCount = 0,
-            .pSignalSemaphores = nullptr
-        };
-
-        vkQueueSubmit(context.graphics_queue(), 1, &submitInfo, VK_NULL_HANDLE);
-        vkQueueWaitIdle(context.graphics_queue());
-
-        vkFreeCommandBuffers(context.device(), context.command_pool(), 1, &commandBuffer);
         vmaDestroyBuffer(context.allocator(), stagingBuffer, stagingAllocation);
+        if (!submitted) {
+            vmaDestroyBuffer(context.allocator(), buffer, allocation);
+            return std::unexpected(submitted.error());
+        }
 
         return std::make_shared<StaticBuffer>(context.shared_from_this(), buffer, allocation, data_size);
     }
