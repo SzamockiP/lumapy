@@ -87,6 +87,7 @@ add_library(_core MODULE
     src/Pipeline.hpp
     src/Renderer.hpp
     src/RenderTarget.hpp
+    src/ScopeGuard.hpp
     src/ShaderCompiler.hpp
     src/SurfaceProvider.hpp
     src/Texture.hpp

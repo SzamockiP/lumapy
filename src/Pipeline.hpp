@@ -10,6 +10,7 @@
 #include "ShaderCompiler.hpp"
 #include "Context.hpp"
 #include "RenderTarget.hpp"
+#include "ScopeGuard.hpp"
 
 // Renamed from Format: this describes a vertex attribute, and `Format` is needed
 // for pixel formats in 0.5.
@@ -234,6 +235,14 @@ public:
         std::vector<VkDescriptorSetLayout> descriptorSetLayouts;
         std::map<uint32_t, Pipeline::BindingTypeMap> allBindingTypes;
 
+        // Owns the layouts until the Pipeline does; every failure path below
+        // used to repeat this loop by hand.
+        ScopeGuard cleanup_layouts([&] {
+            for (auto dl : descriptorSetLayouts) {
+                vkDestroyDescriptorSetLayout(context_.device(), dl, nullptr);
+            }
+        });
+
         if (!descriptor_bindings_.empty()) {
             // Find max set index
             uint32_t maxSetIndex = 0;
@@ -255,10 +264,6 @@ public:
                     VkDescriptorSetLayout layout;
                     if (auto e = check(vkCreateDescriptorSetLayout(context_.device(), &layoutInfo, nullptr, &layout),
                                        "create descriptor set layout for set " + std::to_string(s))) {
-                        // Cleanup already created layouts
-                        for (auto dl : descriptorSetLayouts) {
-                            vkDestroyDescriptorSetLayout(context_.device(), dl, nullptr);
-                        }
                         return std::unexpected(*e);
                     }
                     descriptorSetLayouts.push_back(layout);
@@ -282,9 +287,6 @@ public:
                     VkDescriptorSetLayout layout;
                     if (auto e = check(vkCreateDescriptorSetLayout(context_.device(), &layoutInfo, nullptr, &layout),
                                        "create empty descriptor set layout for set " + std::to_string(s))) {
-                        for (auto dl : descriptorSetLayouts) {
-                            vkDestroyDescriptorSetLayout(context_.device(), dl, nullptr);
-                        }
                         return std::unexpected(*e);
                     }
                     descriptorSetLayouts.push_back(layout);
@@ -451,11 +453,11 @@ public:
         VkPipelineLayout pipelineLayout;
         if (auto e = check(vkCreatePipelineLayout(context_.device(), &pipelineLayoutInfo, nullptr, &pipelineLayout),
                            "create pipeline layout")) {
-            for (auto dl : descriptorSetLayouts) {
-                vkDestroyDescriptorSetLayout(context_.device(), dl, nullptr);
-            }
             return std::unexpected(*e);
         }
+        ScopeGuard cleanup_pipeline_layout([&] {
+            vkDestroyPipelineLayout(context_.device(), pipelineLayout, nullptr);
+        });
 
         // Dynamic Rendering Info
         VkPipelineRenderingCreateInfo pipelineRenderingCreateInfo{
@@ -496,10 +498,6 @@ public:
         // hot reload (0.6) depends on catching exactly this as recoverable.
         if (auto e = check(vkCreateGraphicsPipelines(context_.device(), VK_NULL_HANDLE, 1, &pipelineInfo, nullptr, &graphicsPipeline),
                            "create graphics pipeline", ErrorCode::Shader)) {
-            vkDestroyPipelineLayout(context_.device(), pipelineLayout, nullptr);
-            for (auto dl : descriptorSetLayouts) {
-                vkDestroyDescriptorSetLayout(context_.device(), dl, nullptr);
-            }
             return std::unexpected(*e);
         }
 
@@ -507,6 +505,10 @@ public:
         for (const auto& range : push_constant_ranges_) {
             push_stages |= range.stageFlags;
         }
+
+        // Everything now belongs to the Pipeline.
+        cleanup_layouts.release();
+        cleanup_pipeline_layout.release();
 
         return std::make_shared<Pipeline>(context_.shared_from_this(), graphicsPipeline, pipelineLayout,
                                           std::move(descriptorSetLayouts), std::move(allBindingTypes),
