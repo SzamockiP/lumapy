@@ -441,35 +441,35 @@ PYBIND11_MODULE(_core, m) {
     py::class_<Pipeline, std::shared_ptr<Pipeline>>(m, "Pipeline");
 
     // Lambdas, not member pointers: the setters take a deducing-this object
-    // parameter, so &PipelineBuilder::vertexShader would be a plain function
+    // parameter, so &PipelineBuilder::vertex_shader would be a plain function
     // pointer that .def() cannot treat as a method.
     py::class_<PipelineBuilder, std::shared_ptr<PipelineBuilder>>(m, "PipelineBuilder")
         .def("vertex_shader", [](PipelineBuilder& self, std::shared_ptr<ShaderModule> shader) -> PipelineBuilder& {
-            return self.vertexShader(std::move(shader));
+            return self.vertex_shader(std::move(shader));
         })
         .def("fragment_shader", [](PipelineBuilder& self, std::shared_ptr<ShaderModule> shader) -> PipelineBuilder& {
-            return self.fragmentShader(std::move(shader));
+            return self.fragment_shader(std::move(shader));
         })
         .def("vertex_format", [](PipelineBuilder& self, const std::vector<VertexFormat>& formats) -> PipelineBuilder& {
-            return self.vertexFormat(formats);
+            return self.vertex_format(formats);
         })
         .def("depth_test", [](PipelineBuilder& self, bool enable) -> PipelineBuilder& {
-            return self.depthTest(enable);
+            return self.depth_test(enable);
         })
         .def("cull_mode", [](PipelineBuilder& self, CullMode mode, FrontFace frontFace) -> PipelineBuilder& {
-            return self.cullMode(mode, frontFace);
+            return self.cull_mode(mode, frontFace);
         })
         .def("blend", [](PipelineBuilder& self, bool enable) -> PipelineBuilder& {
             return self.blend(enable);
         })
         .def("push_constant", [](PipelineBuilder& self, uint32_t size, ShaderStage stage) -> PipelineBuilder& {
-            return self.pushConstant(size, stage);
+            return self.push_constant(size, stage);
         })
         .def("uniform_buffer", [](PipelineBuilder& self, uint32_t binding, ShaderStage stage, uint32_t set) -> PipelineBuilder& {
-            return self.uniformBuffer(binding, stage, set);
+            return self.uniform_buffer(binding, stage, set);
         }, py::arg("binding"), py::arg("stage"), py::arg("set"))
         .def("storage_buffer", [](PipelineBuilder& self, uint32_t binding, ShaderStage stage, uint32_t set) -> PipelineBuilder& {
-            return self.storageBuffer(binding, stage, set);
+            return self.storage_buffer(binding, stage, set);
         }, py::arg("binding"), py::arg("stage"), py::arg("set"))
         .def("texture", [](PipelineBuilder& self, uint32_t binding, ShaderStage stage, uint32_t set) -> PipelineBuilder& {
             return self.texture(binding, stage, set);
@@ -483,48 +483,48 @@ PYBIND11_MODULE(_core, m) {
 
     py::class_<DescriptorSet, std::shared_ptr<DescriptorSet>>(m, "DescriptorSet")
         .def("set_texture", [](DescriptorSet& self, uint32_t binding, std::shared_ptr<Texture> texture) {
-            unwrap(self.setTexture(binding, std::move(texture)), nullptr);
+            unwrap(self.set_texture(binding, std::move(texture)), nullptr);
         }, py::arg("binding"), py::arg("texture"))
         .def("set_buffer", [](DescriptorSet& self, uint32_t binding, std::shared_ptr<Buffer> buffer) {
-            unwrap(self.setBuffer(binding, std::move(buffer)), nullptr);
+            unwrap(self.set_buffer(binding, std::move(buffer)), nullptr);
         }, py::arg("binding"), py::arg("buffer"));
 
     py::class_<DescriptorPool, std::shared_ptr<DescriptorPool>>(m, "DescriptorPool")
         .def("allocate_set", [](DescriptorPool& pool, std::shared_ptr<Pipeline> pipeline, uint32_t setIndex) -> py::object {
-            return py::cast(unwrap(pool.allocateDescriptorSet(pipeline, setIndex), pool.logger().get()));
+            return py::cast(unwrap(pool.allocate_descriptor_set(pipeline, setIndex), pool.logger().get()));
         }, py::arg("pipeline"), py::arg("set"))
         .def("allocate_frame_set", [](DescriptorPool& pool, std::shared_ptr<Pipeline> pipeline, uint32_t setIndex) -> py::object {
-            return py::cast(unwrap(pool.allocateFrameDescriptorSet(pipeline, setIndex), pool.logger().get()));
+            return py::cast(unwrap(pool.allocate_frame_descriptor_set(pipeline, setIndex), pool.logger().get()));
         }, py::arg("pipeline"), py::arg("set"));
 
     py::class_<CommandBuffer, std::shared_ptr<CommandBuffer>>(m, "CommandBuffer")
         .def("begin", &CommandBuffer::begin)
         // The target is required. begin_rendering() silently meaning "the
         // swapchain" made presentation a special case disguised as the default.
-        .def("begin_rendering", &CommandBuffer::beginRendering,
+        .def("begin_rendering", &CommandBuffer::begin_rendering,
              py::arg("target"), py::arg("clear_color") = std::vector<float>{0.0f, 0.0f, 0.0f, 1.0f})
-        .def("end_rendering", &CommandBuffer::endRendering, py::arg("target"))
+        .def("end_rendering", &CommandBuffer::end_rendering, py::arg("target"))
         // The no-argument versions are gone: begin_rendering emits a full-target
         // viewport and scissor itself. These remain for split-screen and similar.
-        .def("set_viewport", &CommandBuffer::setViewport,
+        .def("set_viewport", &CommandBuffer::set_viewport,
              py::arg("x"), py::arg("y"), py::arg("width"), py::arg("height"))
-        .def("set_scissor", &CommandBuffer::setScissor,
+        .def("set_scissor", &CommandBuffer::set_scissor,
              py::arg("x"), py::arg("y"), py::arg("width"), py::arg("height"))
-        .def("bind_pipeline", &CommandBuffer::bindPipeline, py::arg("pipeline"))
-        .def("bind_vertex_buffer", &CommandBuffer::bindVertexBuffer, py::arg("buffer"))
-        .def("bind_index_buffer", &CommandBuffer::bindIndexBuffer, py::arg("buffer"))
+        .def("bind_pipeline", &CommandBuffer::bind_pipeline, py::arg("pipeline"))
+        .def("bind_vertex_buffer", &CommandBuffer::bind_vertex_buffer, py::arg("buffer"))
+        .def("bind_index_buffer", &CommandBuffer::bind_index_buffer, py::arg("buffer"))
         .def("draw", &CommandBuffer::draw, py::arg("vertex_count"))
-        .def("draw_indexed", &CommandBuffer::drawIndexed,
+        .def("draw_indexed", &CommandBuffer::draw_indexed,
              py::arg("index_count"), py::arg("first_index") = 0, py::arg("vertex_offset") = 0)
-        .def("draw_indexed_instanced", &CommandBuffer::drawIndexedInstanced,
+        .def("draw_indexed_instanced", &CommandBuffer::draw_indexed_instanced,
              py::arg("index_count"), py::arg("instance_count"),
              py::arg("first_index") = 0, py::arg("vertex_offset") = 0)
         // No stage argument: the Pipeline already records which stages its push
         // constant range covers, so repeating it could only ever be wrong.
         .def("push_constants", [](CommandBuffer& cmd, std::shared_ptr<Pipeline> pipeline, uint32_t offset, std::string_view data) {
-            cmd.pushConstants(pipeline, offset, static_cast<uint32_t>(data.size()), data.data());
+            cmd.push_constants(pipeline, offset, static_cast<uint32_t>(data.size()), data.data());
         }, py::arg("pipeline"), py::arg("offset"), py::arg("data"))
-        .def("bind_descriptor_set", &CommandBuffer::bindDescriptorSet,
+        .def("bind_descriptor_set", &CommandBuffer::bind_descriptor_set,
              py::arg("descriptor_set"), py::arg("pipeline"), py::arg("set"));
 
     // ── Window (GLFW) ──
@@ -608,7 +608,7 @@ PYBIND11_MODULE(_core, m) {
             auto buffer = with_list_bytes(list, actualType, [&](const void* data, size_t nbytes) {
                 return unwrap(Buffer::create(self, data, nbytes, type, usage), self.logger().get());
             });
-            // Recorded so bindIndexBuffer can pick VK_INDEX_TYPE_UINT16 vs UINT32
+            // Recorded so bind_index_buffer can pick VK_INDEX_TYPE_UINT16 vs UINT32
             // instead of assuming.
             buffer->set_data_type(actualType);
             return py::cast(buffer);

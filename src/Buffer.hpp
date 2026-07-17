@@ -49,7 +49,7 @@ public:
             "create the buffer with MemoryUsage.DYNAMIC instead"));
     }
 
-    // Remembered so bindIndexBuffer doesn't have to assume. It used to hardcode
+    // Remembered so bind_index_buffer doesn't have to assume. It used to hardcode
     // VK_INDEX_TYPE_UINT32 while create_buffer happily accepted UINT16 indices,
     // which were then read back at half the count with no error.
     DataType data_type() const { return data_type_; }

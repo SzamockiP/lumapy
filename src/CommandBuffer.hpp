@@ -61,7 +61,7 @@ public:
     // which made presentation a special case dressed up as the default and left
     // no way to name anything else. Naming what you draw into costs one token
     // and buys one rule that holds everywhere.
-    void beginRendering(std::shared_ptr<RenderTarget> target, const std::vector<float>& clear_color) {
+    void begin_rendering(std::shared_ptr<RenderTarget> target, const std::vector<float>& clear_color) {
         std::array<float, 4> cc = {0.0f, 0.0f, 0.0f, 1.0f};
         if (clear_color.size() >= 4) {
             cc[0] = clear_color[0]; cc[1] = clear_color[1]; cc[2] = clear_color[2]; cc[3] = clear_color[3];
@@ -182,7 +182,7 @@ public:
         });
     }
 
-    void endRendering(std::shared_ptr<RenderTarget> target) {
+    void end_rendering(std::shared_ptr<RenderTarget> target) {
         commands_.push_back([target](VkCommandBuffer cmd, const FrameContext& frame) {
             vkCmdEndRendering(cmd);
 
@@ -222,7 +222,7 @@ public:
 
     // Explicit override for split-screen and similar. The no-argument version is
     // gone: begin_rendering already covers the whole-target case.
-    void setViewport(float x, float y, float width, float height) {
+    void set_viewport(float x, float y, float width, float height) {
         commands_.push_back([x, y, width, height](VkCommandBuffer cmd, const FrameContext&) {
             VkViewport viewport{
                 .x = x, .y = y, .width = width, .height = height,
@@ -232,20 +232,20 @@ public:
         });
     }
 
-    void setScissor(std::int32_t x, std::int32_t y, std::uint32_t width, std::uint32_t height) {
+    void set_scissor(std::int32_t x, std::int32_t y, std::uint32_t width, std::uint32_t height) {
         commands_.push_back([x, y, width, height](VkCommandBuffer cmd, const FrameContext&) {
             VkRect2D scissor{ .offset = {x, y}, .extent = {width, height} };
             vkCmdSetScissor(cmd, 0, 1, &scissor);
         });
     }
 
-    void bindPipeline(std::shared_ptr<Pipeline> pipeline) {
+    void bind_pipeline(std::shared_ptr<Pipeline> pipeline) {
         commands_.push_back([pipeline](VkCommandBuffer cmd, const FrameContext&) {
             vkCmdBindPipeline(cmd, pipeline->bind_point(), pipeline->get());
         });
     }
 
-    void bindVertexBuffer(std::shared_ptr<Buffer> buffer) {
+    void bind_vertex_buffer(std::shared_ptr<Buffer> buffer) {
         commands_.push_back([buffer](VkCommandBuffer cmd, const FrameContext&) {
             VkBuffer vertexBuffers[] = {buffer->get()};
             VkDeviceSize offsets[] = {0};
@@ -253,7 +253,7 @@ public:
         });
     }
 
-    void bindIndexBuffer(std::shared_ptr<Buffer> buffer) {
+    void bind_index_buffer(std::shared_ptr<Buffer> buffer) {
         commands_.push_back([buffer](VkCommandBuffer cmd, const FrameContext&) {
             // Derived from the buffer rather than hardcoded to UINT32: create_buffer
             // accepts UINT16 indices, which used to be read back at half count.
@@ -267,13 +267,13 @@ public:
         });
     }
 
-    void drawIndexed(uint32_t indexCount, uint32_t firstIndex = 0, int32_t vertexOffset = 0) {
+    void draw_indexed(uint32_t indexCount, uint32_t firstIndex = 0, int32_t vertexOffset = 0) {
         commands_.push_back([indexCount, firstIndex, vertexOffset](VkCommandBuffer cmd, const FrameContext&) {
             vkCmdDrawIndexed(cmd, indexCount, 1, firstIndex, vertexOffset, 0);
         });
     }
 
-    void drawIndexedInstanced(uint32_t indexCount, uint32_t instanceCount, uint32_t firstIndex = 0, int32_t vertexOffset = 0) {
+    void draw_indexed_instanced(uint32_t indexCount, uint32_t instanceCount, uint32_t firstIndex = 0, int32_t vertexOffset = 0) {
         commands_.push_back([indexCount, instanceCount, firstIndex, vertexOffset](VkCommandBuffer cmd, const FrameContext&) {
             vkCmdDrawIndexed(cmd, indexCount, instanceCount, firstIndex, vertexOffset, 0);
         });
@@ -281,7 +281,7 @@ public:
 
     // No stage argument: the Pipeline already knows which stages its push constant
     // range covers, so passing a mismatched one was a validation error for no gain.
-    void pushConstants(std::shared_ptr<Pipeline> pipeline, uint32_t offset, uint32_t size, const void* data) {
+    void push_constants(std::shared_ptr<Pipeline> pipeline, uint32_t offset, uint32_t size, const void* data) {
         std::vector<uint8_t> buffer(static_cast<const uint8_t*>(data), static_cast<const uint8_t*>(data) + size);
         commands_.push_back([pipeline, offset, size, buffer](VkCommandBuffer cmd, const FrameContext&) {
             vkCmdPushConstants(cmd, pipeline->layout(), pipeline->push_constant_stages(),
@@ -289,7 +289,7 @@ public:
         });
     }
 
-    void bindDescriptorSet(std::shared_ptr<DescriptorSet> descSet,
+    void bind_descriptor_set(std::shared_ptr<DescriptorSet> descSet,
                            std::shared_ptr<Pipeline> pipeline,
                            uint32_t setIndex) {
         commands_.push_back([descSet, pipeline, setIndex](VkCommandBuffer cmd, const FrameContext& frame) {

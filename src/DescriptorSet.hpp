@@ -18,7 +18,7 @@ public:
           binding_types_(std::move(bindingTypes)), is_frame_set_(isFrameSet) {}
 
     // Write a texture to this descriptor set (all copies)
-    std::expected<void, Error> setTexture(uint32_t binding, std::shared_ptr<Texture> texture) {
+    std::expected<void, Error> set_texture(uint32_t binding, std::shared_ptr<Texture> texture) {
         if (!context_) return {};
 
         VkDescriptorImageInfo imageInfo{
@@ -49,7 +49,7 @@ public:
     // Write a buffer to this descriptor set
     // For frame descriptor sets + DynamicBuffer: writes per-frame buffer to each copy
     // For static descriptor sets + DynamicBuffer: bz.ResourceError
-    std::expected<void, Error> setBuffer(uint32_t binding, std::shared_ptr<Buffer> buffer) {
+    std::expected<void, Error> set_buffer(uint32_t binding, std::shared_ptr<Buffer> buffer) {
         if (!context_) return {};
 
         if (!is_frame_set_ && buffer->is_dynamic()) {
@@ -172,7 +172,7 @@ public:
 
     // Allocate a static descriptor set (1 VkDescriptorSet)
     std::expected<std::shared_ptr<DescriptorSet>, Error>
-    allocateDescriptorSet(std::shared_ptr<Pipeline> pipeline, uint32_t setIndex) {
+    allocate_descriptor_set(std::shared_ptr<Pipeline> pipeline, uint32_t setIndex) {
         if (!context_) return std::unexpected(err_init("Context destroyed"));
 
         VkDescriptorSetLayout layout = pipeline->descriptor_set_layout(setIndex);
@@ -201,7 +201,7 @@ public:
 
     // Allocate a frame descriptor set (MAX_FRAMES_IN_FLIGHT VkDescriptorSets)
     std::expected<std::shared_ptr<DescriptorSet>, Error>
-    allocateFrameDescriptorSet(std::shared_ptr<Pipeline> pipeline, uint32_t setIndex) {
+    allocate_frame_descriptor_set(std::shared_ptr<Pipeline> pipeline, uint32_t setIndex) {
         if (!context_) return std::unexpected(err_init("Context destroyed"));
 
         VkDescriptorSetLayout layout = pipeline->descriptor_set_layout(setIndex);

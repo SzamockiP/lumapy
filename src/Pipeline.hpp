@@ -154,35 +154,35 @@ public:
     // Chained setters use C++23 deducing this: the object parameter's value
     // category is forwarded, so a chain on a temporary builder moves instead of
     // pinning an lvalue. The pybind layer binds these through lambdas — an
-    // explicit object parameter turns &PipelineBuilder::vertexShader into a
+    // explicit object parameter turns &PipelineBuilder::vertex_shader into a
     // plain function-pointer type that .def() would misread.
 
     template <typename Self>
-    Self&& vertexShader(this Self&& self, std::shared_ptr<ShaderModule> shader) {
+    Self&& vertex_shader(this Self&& self, std::shared_ptr<ShaderModule> shader) {
         self.vertex_shader_ = std::move(shader);
         return std::forward<Self>(self);
     }
 
     template <typename Self>
-    Self&& fragmentShader(this Self&& self, std::shared_ptr<ShaderModule> shader) {
+    Self&& fragment_shader(this Self&& self, std::shared_ptr<ShaderModule> shader) {
         self.fragment_shader_ = std::move(shader);
         return std::forward<Self>(self);
     }
 
     template <typename Self>
-    Self&& vertexFormat(this Self&& self, const std::vector<VertexFormat>& formats) {
+    Self&& vertex_format(this Self&& self, const std::vector<VertexFormat>& formats) {
         self.formats_ = formats;
         return std::forward<Self>(self);
     }
 
     template <typename Self>
-    Self&& depthTest(this Self&& self, bool enable) {
+    Self&& depth_test(this Self&& self, bool enable) {
         self.depth_test_ = enable;
         return std::forward<Self>(self);
     }
 
     template <typename Self>
-    Self&& cullMode(this Self&& self, CullMode mode, FrontFace frontFace) {
+    Self&& cull_mode(this Self&& self, CullMode mode, FrontFace frontFace) {
         self.cull_mode_ = mode;
         self.front_face_ = frontFace;
         return std::forward<Self>(self);
@@ -195,7 +195,7 @@ public:
     }
 
     template <typename Self>
-    Self&& pushConstant(this Self&& self, uint32_t size, ShaderStage stage) {
+    Self&& push_constant(this Self&& self, uint32_t size, ShaderStage stage) {
         VkPushConstantRange range{
             .stageFlags = static_cast<VkShaderStageFlags>(to_vk(stage)),
             .offset = 0,
@@ -206,18 +206,18 @@ public:
     }
 
     template <typename Self>
-    Self&& uniformBuffer(this Self&& self, uint32_t binding, ShaderStage stage, uint32_t set) {
-        return std::forward<Self>(self).addDescriptorBinding_(binding, stage, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, set);
+    Self&& uniform_buffer(this Self&& self, uint32_t binding, ShaderStage stage, uint32_t set) {
+        return std::forward<Self>(self).add_descriptor_binding_(binding, stage, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, set);
     }
 
     template <typename Self>
-    Self&& storageBuffer(this Self&& self, uint32_t binding, ShaderStage stage, uint32_t set) {
-        return std::forward<Self>(self).addDescriptorBinding_(binding, stage, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, set);
+    Self&& storage_buffer(this Self&& self, uint32_t binding, ShaderStage stage, uint32_t set) {
+        return std::forward<Self>(self).add_descriptor_binding_(binding, stage, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, set);
     }
 
     template <typename Self>
     Self&& texture(this Self&& self, uint32_t binding, ShaderStage stage, uint32_t set) {
-        return std::forward<Self>(self).addDescriptorBinding_(binding, stage, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, set);
+        return std::forward<Self>(self).add_descriptor_binding_(binding, stage, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, set);
     }
 
     // Build the pipeline with explicit color/depth formats (decoupled from renderer)
@@ -570,7 +570,7 @@ private:
     }
 
     template <typename Self>
-    Self&& addDescriptorBinding_(this Self&& self, uint32_t binding, ShaderStage stage, VkDescriptorType descriptorType, uint32_t setIndex) {
+    Self&& add_descriptor_binding_(this Self&& self, uint32_t binding, ShaderStage stage, VkDescriptorType descriptorType, uint32_t setIndex) {
         VkShaderStageFlags stageFlag = static_cast<VkShaderStageFlags>(to_vk(stage));
 
         auto& bindings = self.descriptor_bindings_[setIndex];
