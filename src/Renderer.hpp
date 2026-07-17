@@ -4,6 +4,7 @@
 #include <vk_mem_alloc.h>
 
 #include <expected>
+#include <format>
 #include <memory>
 #include <vector>
 #include <string>
@@ -43,21 +44,16 @@ inline SwapchainSupportDetails query_swapchain_support(VkPhysicalDevice device, 
 }
 
 inline VkSurfaceFormatKHR choose_swap_surface_format(const std::vector<VkSurfaceFormatKHR>& availableFormats) {
-	for (const auto& availableFormat : availableFormats) {
-		if (availableFormat.format == VK_FORMAT_B8G8R8A8_SRGB && availableFormat.colorSpace == VK_COLOR_SPACE_SRGB_NONLINEAR_KHR) {
-			return availableFormat;
-		}
-	}
-	return availableFormats[0];
+	auto it = std::ranges::find_if(availableFormats, [](const VkSurfaceFormatKHR& f) {
+		return f.format == VK_FORMAT_B8G8R8A8_SRGB && f.colorSpace == VK_COLOR_SPACE_SRGB_NONLINEAR_KHR;
+	});
+	return it != availableFormats.end() ? *it : availableFormats[0];
 }
 
 inline VkPresentModeKHR choose_swap_present_mode(const std::vector<VkPresentModeKHR>& availablePresentModes) {
-	for (const auto& availablePresentMode : availablePresentModes) {
-		if (availablePresentMode == VK_PRESENT_MODE_MAILBOX_KHR) {
-			return availablePresentMode;
-		}
-	}
-	return VK_PRESENT_MODE_FIFO_KHR;
+	return std::ranges::contains(availablePresentModes, VK_PRESENT_MODE_MAILBOX_KHR)
+		? VK_PRESENT_MODE_MAILBOX_KHR
+		: VK_PRESENT_MODE_FIFO_KHR;
 }
 
 inline VkExtent2D choose_swap_extent(const VkSurfaceCapabilitiesKHR& capabilities, int width, int height) {
@@ -291,7 +287,7 @@ public:
 			return false;
 		} else if (result != VK_SUCCESS && result != VK_SUBOPTIMAL_KHR) {
 			if (auto l = context_->logger()) l->log(Severity::Error, Source::Device,
-				"Failed to acquire swapchain image (" + std::string(vk_result_name(result)) + ")");
+				std::format("Failed to acquire swapchain image ({})", vk_result_name(result)));
 			frame_skipped_ = true;
 			return false;
 		}
@@ -322,7 +318,7 @@ public:
 		if (VkResult submit_result = vkQueueSubmit(context_->graphics_queue(), 1, &submitInfo, in_flight_fences_[current_frame()]);
 		    submit_result != VK_SUCCESS) {
 			if (auto l = context_->logger()) l->log(Severity::Error, Source::Device,
-				"Failed to submit draw command buffer (" + std::string(vk_result_name(submit_result)) + ")");
+				std::format("Failed to submit draw command buffer ({})", vk_result_name(submit_result)));
 		}
 
 		VkPresentInfoKHR presentInfo{
@@ -533,7 +529,8 @@ private:
 			return;
 		}
 
-		if (auto l = context_->logger()) l->log(Severity::Info, Source::Device, "Swapchain recreated (" + std::to_string(swapchain_extent_.width) + "x" + std::to_string(swapchain_extent_.height) + ")");
+		if (auto l = context_->logger()) l->log(Severity::Info, Source::Device,
+			std::format("Swapchain recreated ({}x{})", swapchain_extent_.width, swapchain_extent_.height));
 	}
 
 	// Depth image + view sized to the current swapchain extent. Shared by first

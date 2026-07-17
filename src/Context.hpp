@@ -5,6 +5,7 @@
 
 #include <atomic>
 #include <expected>
+#include <format>
 #include <memory>
 #include <set>
 #include <string>
@@ -93,10 +94,11 @@ public:
 			// machine is unreadable without knowing whether it took the 1.3-core or
 			// the 1.2+KHR route, and whether it went headless.
 			logger->log(Severity::Info, Source::General,
-				"Vulkan: Initialized (" + context->device_name() +
-				", API " + api_version_string(context->api_version()) +
-				", dynamic rendering: " + (context->dynamic_rendering_khr_ ? "KHR extension" : "core") +
-				(context->headless_ ? ", headless" : "") + ")");
+				std::format("Vulkan: Initialized ({}, API {}, dynamic rendering: {}{})",
+					context->device_name(),
+					api_version_string(context->api_version()),
+					context->dynamic_rendering_khr_ ? "KHR extension" : "core",
+					context->headless_ ? ", headless" : ""));
 		}
 
 		// Last thing before handing the Context over: only a fully built Context
@@ -388,8 +390,8 @@ private:
 			else if (logger)
 			{
 				logger->log(Severity::Info, Source::General,
-					std::string("Vulkan: optional feature ") + std::string(feature_name(feature)) +
-					" is not supported by this GPU");
+					std::format("Vulkan: optional feature {} is not supported by this GPU",
+						feature_name(feature)));
 			}
 		}
 

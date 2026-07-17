@@ -3,7 +3,10 @@
 #include <pybind11/stl.h>
 #include <pybind11/numpy.h>
 #include <atomic>
+#include <cstddef>
 #include <expected>
+#include <format>
+#include <span>
 #include <chrono>
 
 #ifdef _WIN32
@@ -216,9 +219,9 @@ size_t contiguous_nbytes(const py::buffer_info& info, const char* what)
 {
     if (!is_c_contiguous(info))
     {
-        raise_error(err_resource(
-            std::string(what) + " requires a C-contiguous array, got a strided view "
-            "(e.g. arr.T or arr[::2]). Pass numpy.ascontiguousarray(arr) instead."));
+        raise_error(err_resource(std::format(
+            "{} requires a C-contiguous array, got a strided view "
+            "(e.g. arr.T or arr[::2]). Pass numpy.ascontiguousarray(arr) instead.", what)));
     }
     return static_cast<size_t>(info.size) * static_cast<size_t>(info.itemsize);
 }
@@ -231,6 +234,8 @@ const char* severity_name(Severity severity)
     case Severity::Warning: return "WARNING";
     case Severity::Error:   return "ERROR";
     }
+    // Not std::unreachable(): pybind enums accept arbitrary ints, so a forged
+    // Severity from Python must degrade gracefully, not invoke UB.
     return "INFO";
 }
 
@@ -240,7 +245,7 @@ ValidationMode parse_validation(const std::string& value)
     if (value == "on")   return ValidationMode::On;
     if (value == "off")  return ValidationMode::Off;
     throw std::invalid_argument(
-        "validation must be one of 'auto', 'on', 'off' (got '" + value + "')");
+        std::format("validation must be one of 'auto', 'on', 'off' (got '{}')", value));
 }
 
 // A Context built without a logger used to render with validation off and say
@@ -251,7 +256,7 @@ std::shared_ptr<Logger> make_default_logger()
     logger->register_callback(py::cpp_function([](const LogMessage& msg) {
         py::object stderr_stream = py::module_::import("sys").attr("stderr");
         stderr_stream.attr("write")(
-            std::string("[bazalt] ") + severity_name(msg.severity) + ": " + msg.text + "\n");
+            std::format("[bazalt] {}: {}\n", severity_name(msg.severity), msg.text));
     }));
     return logger;
 }
@@ -344,10 +349,10 @@ PYBIND11_MODULE(_core, m) {
         .def_readonly("source", &LogMessage::source)
         .def_readonly("text", &LogMessage::text)
         .def("__str__", [](const LogMessage& msg) {
-            return std::string(severity_name(msg.severity)) + ": " + msg.text;
+            return std::format("{}: {}", severity_name(msg.severity), msg.text);
         })
         .def("__repr__", [](const LogMessage& msg) {
-            return std::string("<LogMessage ") + severity_name(msg.severity) + " '" + msg.text + "'>";
+            return std::format("<LogMessage {} '{}'>", severity_name(msg.severity), msg.text);
         });
 
     // Capabilities, not versions/extensions: the same capability has different
@@ -412,17 +417,18 @@ PYBIND11_MODULE(_core, m) {
 
     py::class_<Buffer, std::shared_ptr<Buffer>>(m, "Buffer")
         .def("update", [](Buffer& buffer, std::string_view data) {
-            unwrap(buffer.update(data.data(), data.size()), nullptr);
+            unwrap(buffer.update(std::as_bytes(std::span(data.data(), data.size()))), nullptr);
         })
         .def("update", [](Buffer& buffer, py::buffer b) {
             py::buffer_info info = b.request();
-            unwrap(buffer.update(info.ptr, contiguous_nbytes(info, "Buffer.update")), nullptr);
+            const size_t nbytes = contiguous_nbytes(info, "Buffer.update");
+            unwrap(buffer.update({static_cast<const std::byte*>(info.ptr), nbytes}), nullptr);
         })
         .def("update", [](Buffer& buffer, py::list list, std::optional<DataType> dataType) {
             if (list.empty()) return;
             DataType actualType = resolve_data_type(list, dataType, DataType::INT32);
             with_list_bytes(list, actualType, [&](const void* data, size_t nbytes) {
-                unwrap(buffer.update(data, nbytes), nullptr);
+                unwrap(buffer.update({static_cast<const std::byte*>(data), nbytes}), nullptr);
             });
         }, py::arg("list"), py::arg("data_type") = py::none());
     
@@ -434,20 +440,40 @@ PYBIND11_MODULE(_core, m) {
 
     py::class_<Pipeline, std::shared_ptr<Pipeline>>(m, "Pipeline");
 
+    // Lambdas, not member pointers: the setters take a deducing-this object
+    // parameter, so &PipelineBuilder::vertexShader would be a plain function
+    // pointer that .def() cannot treat as a method.
     py::class_<PipelineBuilder, std::shared_ptr<PipelineBuilder>>(m, "PipelineBuilder")
-        .def("vertex_shader", &PipelineBuilder::vertexShader)
-        .def("fragment_shader", &PipelineBuilder::fragmentShader)
-        .def("vertex_format", &PipelineBuilder::vertexFormat)
-        .def("depth_test", &PipelineBuilder::depthTest)
-        .def("cull_mode", &PipelineBuilder::cullMode)
-        .def("blend", &PipelineBuilder::blend)
-        .def("push_constant", &PipelineBuilder::pushConstant)
-        .def("uniform_buffer", &PipelineBuilder::uniformBuffer,
-             py::arg("binding"), py::arg("stage"), py::arg("set"))
-        .def("storage_buffer", &PipelineBuilder::storageBuffer,
-             py::arg("binding"), py::arg("stage"), py::arg("set"))
-        .def("texture", &PipelineBuilder::texture,
-             py::arg("binding"), py::arg("stage"), py::arg("set"))
+        .def("vertex_shader", [](PipelineBuilder& self, std::shared_ptr<ShaderModule> shader) -> PipelineBuilder& {
+            return self.vertexShader(std::move(shader));
+        })
+        .def("fragment_shader", [](PipelineBuilder& self, std::shared_ptr<ShaderModule> shader) -> PipelineBuilder& {
+            return self.fragmentShader(std::move(shader));
+        })
+        .def("vertex_format", [](PipelineBuilder& self, const std::vector<VertexFormat>& formats) -> PipelineBuilder& {
+            return self.vertexFormat(formats);
+        })
+        .def("depth_test", [](PipelineBuilder& self, bool enable) -> PipelineBuilder& {
+            return self.depthTest(enable);
+        })
+        .def("cull_mode", [](PipelineBuilder& self, CullMode mode, FrontFace frontFace) -> PipelineBuilder& {
+            return self.cullMode(mode, frontFace);
+        })
+        .def("blend", [](PipelineBuilder& self, bool enable) -> PipelineBuilder& {
+            return self.blend(enable);
+        })
+        .def("push_constant", [](PipelineBuilder& self, uint32_t size, ShaderStage stage) -> PipelineBuilder& {
+            return self.pushConstant(size, stage);
+        })
+        .def("uniform_buffer", [](PipelineBuilder& self, uint32_t binding, ShaderStage stage, uint32_t set) -> PipelineBuilder& {
+            return self.uniformBuffer(binding, stage, set);
+        }, py::arg("binding"), py::arg("stage"), py::arg("set"))
+        .def("storage_buffer", [](PipelineBuilder& self, uint32_t binding, ShaderStage stage, uint32_t set) -> PipelineBuilder& {
+            return self.storageBuffer(binding, stage, set);
+        }, py::arg("binding"), py::arg("stage"), py::arg("set"))
+        .def("texture", [](PipelineBuilder& self, uint32_t binding, ShaderStage stage, uint32_t set) -> PipelineBuilder& {
+            return self.texture(binding, stage, set);
+        }, py::arg("binding"), py::arg("stage"), py::arg("set"))
         // Takes any RenderTarget. A SwapchainRenderer *is* one, so windowed code
         // reads the same as offscreen code — build(renderer) still works, it just
         // isn't a special case any more.

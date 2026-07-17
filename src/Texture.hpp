@@ -1,6 +1,7 @@
 #pragma once
 #include <volk.h>
 #include <vk_mem_alloc.h>
+#include <format>
 #include <string>
 #include <memory>
 #include <expected>
@@ -47,8 +48,9 @@ public:
             // stb knows whether this was a missing file or a corrupt one; saying
             // only "Failed to load" throws that away.
             const char* reason = stbi_failure_reason();
-            return std::unexpected(err_resource("Failed to load texture: " + path +
-                                                (reason ? std::string(" (") + reason + ")" : "")));
+            return std::unexpected(err_resource(reason
+                ? std::format("Failed to load texture: {} ({})", path, reason)
+                : std::format("Failed to load texture: {}", path)));
         }
 
         VkDeviceSize imageSize = static_cast<VkDeviceSize>(width) * height * 4;

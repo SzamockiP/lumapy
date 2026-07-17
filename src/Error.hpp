@@ -1,6 +1,7 @@
 #pragma once
 #include <volk.h>
 
+#include <format>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -46,7 +47,7 @@ struct Error
 	int line = -1;
 };
 
-inline std::string_view vk_result_name(VkResult result)
+inline constexpr std::string_view vk_result_name(VkResult result)
 {
 	switch (result)
 	{
@@ -83,7 +84,7 @@ inline std::string_view vk_result_name(VkResult result)
 // Vulkan tells us the *kind* of failure; the call site tells us the *context*.
 // Well-known results map to a code wherever they happen; everything else falls
 // back to whatever the caller considers appropriate.
-inline ErrorCode code_from_vk_result(VkResult result, ErrorCode fallback)
+inline constexpr ErrorCode code_from_vk_result(VkResult result, ErrorCode fallback)
 {
 	switch (result)
 	{
@@ -114,8 +115,7 @@ inline std::optional<Error> check(VkResult result,
 	Error error;
 	error.code = code_from_vk_result(result, fallback);
 	error.result = result;
-	error.message = "Vulkan: failed to " + std::string(what) + " (" +
-	                std::string(vk_result_name(result)) + ")";
+	error.message = std::format("Vulkan: failed to {} ({})", what, vk_result_name(result));
 	return error;
 }
 

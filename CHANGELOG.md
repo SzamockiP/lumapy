@@ -30,6 +30,11 @@ No public Python API changes.
 ### Changed
 - CI now builds `release/**` branches and smoke-tests every built wheel
   (`import bazalt` + stub consistency); the GPU test suite remains local.
+- Internal C++23 modernisation: `std::format` for diagnostics,
+  `std::ranges` for searches and folds, `constexpr` lookup tables,
+  `std::span<const std::byte>` on the buffer-update path, and deducing
+  `this` for the pipeline builder's chained setters. Building from source
+  now requires GCC 14+ or MSVC 19.36+ (prebuilt wheels are unaffected).
 
 ### Added
 - Behaviour-pinning tests for previously untested bindings: non-indexed

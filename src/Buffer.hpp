@@ -1,6 +1,8 @@
 #pragma once
 #include <volk.h>
 #include <vk_mem_alloc.h>
+#include <cstddef>
+#include <format>
 #include <span>
 #include <string>
 #include <memory>
@@ -41,7 +43,7 @@ public:
     // Fails through the unified Error channel, not a raw exception: at the
     // pybind boundary this surfaces as bz.ResourceError, so `except BazaltError`
     // actually catches it.
-    virtual std::expected<void, Error> update(const void* /*data*/, size_t /*size*/) {
+    virtual std::expected<void, Error> update(std::span<const std::byte> /*data*/) {
         return std::unexpected(err_resource(
             "update() is only supported on DYNAMIC buffers; "
             "create the buffer with MemoryUsage.DYNAMIC instead"));
@@ -202,11 +204,11 @@ public:
     VkBuffer get_for_frame(uint32_t frame) const override { return buffers_[frame]; }
     BufferType buffer_type() const { return type_; }
 
-    std::expected<void, Error> update(const void* data, size_t size) override {
-        if (size > size_) {
+    std::expected<void, Error> update(std::span<const std::byte> data) override {
+        if (data.size() > size_) {
             return std::unexpected(err_resource(
-                "Update of " + std::to_string(size) + " bytes exceeds the buffer size of " +
-                std::to_string(size_) + " bytes"));
+                std::format("Update of {} bytes exceeds the buffer size of {} bytes",
+                            data.size(), size_)));
         }
         uint32_t frame = context_->current_frame();
         void* mappedData;
@@ -214,7 +216,7 @@ public:
                            "map dynamic buffer memory for update", ErrorCode::Resource)) {
             return std::unexpected(*e);
         }
-        std::memcpy(mappedData, data, size);
+        std::memcpy(mappedData, data.data(), data.size());
         vmaUnmapMemory(context_->allocator(), allocations_[frame]);
         return {};
     }

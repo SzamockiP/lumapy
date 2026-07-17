@@ -1,12 +1,15 @@
 #pragma once
 #include <volk.h>
+#include <algorithm>
+#include <functional>
 #include <vector>
 #include <memory>
-#include <stdexcept>
 #include <expected>
 #include <array>
 #include <map>
+#include <ranges>
 #include <unordered_map>
+#include <utility>
 #include "ShaderCompiler.hpp"
 #include "Context.hpp"
 #include "RenderTarget.hpp"
@@ -148,57 +151,73 @@ class PipelineBuilder {
 public:
     PipelineBuilder(Context& context) : context_(context) {}
 
-    PipelineBuilder& vertexShader(std::shared_ptr<ShaderModule> shader) {
-        vertex_shader_ = shader;
-        return *this;
+    // Chained setters use C++23 deducing this: the object parameter's value
+    // category is forwarded, so a chain on a temporary builder moves instead of
+    // pinning an lvalue. The pybind layer binds these through lambdas — an
+    // explicit object parameter turns &PipelineBuilder::vertexShader into a
+    // plain function-pointer type that .def() would misread.
+
+    template <typename Self>
+    Self&& vertexShader(this Self&& self, std::shared_ptr<ShaderModule> shader) {
+        self.vertex_shader_ = std::move(shader);
+        return std::forward<Self>(self);
     }
 
-    PipelineBuilder& fragmentShader(std::shared_ptr<ShaderModule> shader) {
-        fragment_shader_ = shader;
-        return *this;
+    template <typename Self>
+    Self&& fragmentShader(this Self&& self, std::shared_ptr<ShaderModule> shader) {
+        self.fragment_shader_ = std::move(shader);
+        return std::forward<Self>(self);
     }
 
-    PipelineBuilder& vertexFormat(const std::vector<VertexFormat>& formats) {
-        formats_ = formats;
-        return *this;
+    template <typename Self>
+    Self&& vertexFormat(this Self&& self, const std::vector<VertexFormat>& formats) {
+        self.formats_ = formats;
+        return std::forward<Self>(self);
     }
 
-    PipelineBuilder& depthTest(bool enable) {
-        depth_test_ = enable;
-        return *this;
+    template <typename Self>
+    Self&& depthTest(this Self&& self, bool enable) {
+        self.depth_test_ = enable;
+        return std::forward<Self>(self);
     }
 
-    PipelineBuilder& cullMode(CullMode mode, FrontFace frontFace) {
-        cull_mode_ = mode;
-        front_face_ = frontFace;
-        return *this;
+    template <typename Self>
+    Self&& cullMode(this Self&& self, CullMode mode, FrontFace frontFace) {
+        self.cull_mode_ = mode;
+        self.front_face_ = frontFace;
+        return std::forward<Self>(self);
     }
 
-    PipelineBuilder& blend(bool enable) {
-        blend_enable_ = enable;
-        return *this;
+    template <typename Self>
+    Self&& blend(this Self&& self, bool enable) {
+        self.blend_enable_ = enable;
+        return std::forward<Self>(self);
     }
 
-    PipelineBuilder& pushConstant(uint32_t size, ShaderStage stage) {
+    template <typename Self>
+    Self&& pushConstant(this Self&& self, uint32_t size, ShaderStage stage) {
         VkPushConstantRange range{
             .stageFlags = static_cast<VkShaderStageFlags>(to_vk(stage)),
             .offset = 0,
             .size = size
         };
-        push_constant_ranges_.push_back(range);
-        return *this;
+        self.push_constant_ranges_.push_back(range);
+        return std::forward<Self>(self);
     }
 
-    PipelineBuilder& uniformBuffer(uint32_t binding, ShaderStage stage, uint32_t set) {
-        return addDescriptorBinding_(binding, stage, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, set);
+    template <typename Self>
+    Self&& uniformBuffer(this Self&& self, uint32_t binding, ShaderStage stage, uint32_t set) {
+        return std::forward<Self>(self).addDescriptorBinding_(binding, stage, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, set);
     }
 
-    PipelineBuilder& storageBuffer(uint32_t binding, ShaderStage stage, uint32_t set) {
-        return addDescriptorBinding_(binding, stage, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, set);
+    template <typename Self>
+    Self&& storageBuffer(this Self&& self, uint32_t binding, ShaderStage stage, uint32_t set) {
+        return std::forward<Self>(self).addDescriptorBinding_(binding, stage, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, set);
     }
 
-    PipelineBuilder& texture(uint32_t binding, ShaderStage stage, uint32_t set) {
-        return addDescriptorBinding_(binding, stage, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, set);
+    template <typename Self>
+    Self&& texture(this Self&& self, uint32_t binding, ShaderStage stage, uint32_t set) {
+        return std::forward<Self>(self).addDescriptorBinding_(binding, stage, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, set);
     }
 
     // Build the pipeline with explicit color/depth formats (decoupled from renderer)
@@ -347,10 +366,9 @@ public:
             return std::unexpected(*e);
         }
 
-        VkShaderStageFlags push_stages = 0;
-        for (const auto& range : push_constant_ranges_) {
-            push_stages |= range.stageFlags;
-        }
+        const VkShaderStageFlags push_stages = std::ranges::fold_left(
+            push_constant_ranges_ | std::views::transform(&VkPushConstantRange::stageFlags),
+            VkShaderStageFlags{0}, std::bit_or{});
 
         // Everything now belongs to the Pipeline.
         cleanup_layouts.release();
@@ -404,10 +422,8 @@ private:
             return {};
         }
 
-        uint32_t maxSetIndex = 0;
-        for (const auto& [idx, _] : descriptor_bindings_) {
-            if (idx > maxSetIndex) maxSetIndex = idx;
-        }
+        // Parenthesised to dodge the max() macro from <windows.h>.
+        const uint32_t maxSetIndex = (std::ranges::max)(descriptor_bindings_ | std::views::keys);
 
         for (uint32_t s = 0; s <= maxSetIndex; s++) {
             auto it = descriptor_bindings_.find(s);
@@ -553,16 +569,16 @@ private:
         return pipelineLayout;
     }
 
-    PipelineBuilder& addDescriptorBinding_(uint32_t binding, ShaderStage stage, VkDescriptorType descriptorType, uint32_t setIndex) {
+    template <typename Self>
+    Self&& addDescriptorBinding_(this Self&& self, uint32_t binding, ShaderStage stage, VkDescriptorType descriptorType, uint32_t setIndex) {
         VkShaderStageFlags stageFlag = static_cast<VkShaderStageFlags>(to_vk(stage));
-        
-        auto& bindings = descriptor_bindings_[setIndex];
-        
-        for (auto& b : bindings) {
-            if (b.binding == binding) {
-                b.stageFlags |= stageFlag;
-                return *this;
-            }
+
+        auto& bindings = self.descriptor_bindings_[setIndex];
+
+        auto it = std::ranges::find(bindings, binding, &VkDescriptorSetLayoutBinding::binding);
+        if (it != bindings.end()) {
+            it->stageFlags |= stageFlag;
+            return std::forward<Self>(self);
         }
 
         VkDescriptorSetLayoutBinding layoutBinding{
@@ -573,7 +589,7 @@ private:
             .pImmutableSamplers = nullptr
         };
         bindings.push_back(layoutBinding);
-        return *this;
+        return std::forward<Self>(self);
     }
 
     Context& context_;
