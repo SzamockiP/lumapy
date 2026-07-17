@@ -127,8 +127,10 @@ public:
 
 		// Swapchain
 		auto [width, height] = renderer->surface_provider_.get_framebuffer_size();
-		if (!renderer->create_swapchain_manually(width, height)) {
-			return std::unexpected(err_init("Vulkan: Failed to create swapchain"));
+		if (auto r = renderer->create_swapchain_manually(width, height); !r) {
+			// Propagate the real Error: this used to collapse to a bare
+			// "Failed to create swapchain", discarding the VkResult that says why.
+			return std::unexpected(r.error());
 		}
 
 		// Sync Objects
@@ -337,7 +339,8 @@ public:
 			frame_skipped_ = true;
 			return false;
 		} else if (result != VK_SUCCESS && result != VK_SUBOPTIMAL_KHR) {
-			if (auto l = context_->logger()) l->log(Severity::Error, Source::Device, "Failed to acquire swapchain image!");
+			if (auto l = context_->logger()) l->log(Severity::Error, Source::Device,
+				"Failed to acquire swapchain image (" + std::string(vk_result_name(result)) + ")");
 			frame_skipped_ = true;
 			return false;
 		}
@@ -365,8 +368,10 @@ public:
 			.pSignalSemaphores = signalSemaphores
 		};
 
-		if (vkQueueSubmit(context_->graphics_queue(), 1, &submitInfo, in_flight_fences_[current_frame()]) != VK_SUCCESS) {
-			if (auto l = context_->logger()) l->log(Severity::Error, Source::Device, "Failed to submit draw command buffer!");
+		if (VkResult submit_result = vkQueueSubmit(context_->graphics_queue(), 1, &submitInfo, in_flight_fences_[current_frame()]);
+		    submit_result != VK_SUCCESS) {
+			if (auto l = context_->logger()) l->log(Severity::Error, Source::Device,
+				"Failed to submit draw command buffer (" + std::string(vk_result_name(submit_result)) + ")");
 		}
 
 		VkPresentInfoKHR presentInfo{
@@ -419,7 +424,7 @@ private:
 
 	bool frame_skipped_ = false;
 
-	bool create_swapchain_manually(int width, int height, VkSwapchainKHR old_swapchain = VK_NULL_HANDLE)
+	std::expected<void, Error> create_swapchain_manually(int width, int height, VkSwapchainKHR old_swapchain = VK_NULL_HANDLE)
 	{
 		auto details = query_swapchain_support(context_->physical_device(), surface_);
 		auto surface_format = choose_swap_surface_format(details.formats);
@@ -464,8 +469,9 @@ private:
 		}
 
 		VkSwapchainKHR new_swapchain;
-		if (vkCreateSwapchainKHR(context_->device(), &createInfo, nullptr, &new_swapchain) != VK_SUCCESS) {
-			return false;
+		if (auto e = check(vkCreateSwapchainKHR(context_->device(), &createInfo, nullptr, &new_swapchain),
+		                   "create swapchain")) {
+			return std::unexpected(*e);
 		}
 
 		swapchain_ = new_swapchain;
@@ -503,12 +509,13 @@ private:
 				}
 			};
 
-			if (vkCreateImageView(context_->device(), &viewInfo, nullptr, &swapchain_image_views_[i]) != VK_SUCCESS) {
-				return false;
+			if (auto e = check(vkCreateImageView(context_->device(), &viewInfo, nullptr, &swapchain_image_views_[i]),
+			                   "create swapchain image view")) {
+				return std::unexpected(*e);
 			}
 		}
 
-		return true;
+		return {};
 	}
 
 	void recreate_swapchain()
@@ -541,8 +548,12 @@ private:
 
 		VkSwapchainKHR old_swapchain = swapchain_;
 		auto [width, height] = surface_provider_.get_framebuffer_size();
-		if (!create_swapchain_manually(width, height, old_swapchain)) {
-			if (auto l = context_->logger()) l->log(Severity::Error, Source::Device, "Failed to recreate swapchain manually!");
+		if (auto r = create_swapchain_manually(width, height, old_swapchain); !r) {
+			// This runs mid-frame, so it keeps the log-and-bail contract — but it
+			// logs the propagated Error (VkResult name included), not a hand-written
+			// string.
+			if (auto l = context_->logger()) l->log(Severity::Error, Source::Device,
+				"Failed to recreate swapchain: " + r.error().message);
 			return;
 		}
 
