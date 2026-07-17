@@ -160,11 +160,14 @@ public:
 		return vkb_physical_device_.properties.deviceName;
 	}
 
-	// Raw, so callers can compare versions. Context stays ignorant of shaderc:
-	// ShaderCompiler maps this onto a shaderc_env_version itself.
+	// The *negotiated* version — what the device was actually created against —
+	// not the raw properties.apiVersion. A 1.3-capable GPU behind a 1.2 loader
+	// runs the 1.2+KHR path, and shaders compiled for 1.3 would be invalid
+	// there. Context stays ignorant of shaderc: ShaderCompiler maps this onto
+	// a shaderc_env_version itself.
 	std::uint32_t api_version() const
 	{
-		return vkb_physical_device_.properties.apiVersion;
+		return negotiated_api_version_;
 	}
 
 	// True when no windowing extensions were available, so no SwapchainRenderer
@@ -353,11 +356,13 @@ private:
 		if (has_1_3 && device_has_1_3)
 		{
 			// core path — VkPhysicalDeviceVulkan13Features in create_device_
+			ctx.negotiated_api_version_ = VK_API_VERSION_1_3;
 		}
 		else if (ctx.vkb_physical_device_.enable_extension_if_present(
 			VK_KHR_DYNAMIC_RENDERING_EXTENSION_NAME))
 		{
 			ctx.dynamic_rendering_khr_ = true;
+			ctx.negotiated_api_version_ = VK_API_VERSION_1_2;
 		}
 		else
 		{
@@ -410,9 +415,15 @@ private:
 	// Only entered once the PhysicalDevice is final and safe to copy.
 	static std::expected<void, Error> create_device_(Context& ctx)
 	{
+		// shaderDemoteToHelperInvocation / shaderTerminateInvocation are mandatory
+		// in Vulkan 1.3, and glslang compiles `discard` to one of those opcodes
+		// when targeting SPIR-V 1.6 — so a fragment shader with `discard` breaks
+		// unless they are enabled alongside the 1.3 target.
 		VkPhysicalDeviceVulkan13Features features13{
 			.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES,
 			.pNext = nullptr,
+			.shaderDemoteToHelperInvocation = VK_TRUE,
+			.shaderTerminateInvocation = VK_TRUE,
 			.dynamicRendering = VK_TRUE
 		};
 		VkPhysicalDeviceDynamicRenderingFeaturesKHR dynamic_rendering_khr{
@@ -556,6 +567,9 @@ private:
 	bool headless_ = false;
 	bool swapchain_supported_ = false;
 	bool dynamic_rendering_khr_ = false;
+
+	// Set by configure_features_: 1.3 on the core path, 1.2 on the KHR path.
+	std::uint32_t negotiated_api_version_ = VK_API_VERSION_1_2;
 
 	std::uint32_t current_frame_ = 0;
 };
