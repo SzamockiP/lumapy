@@ -7,7 +7,6 @@
 #include <stdexcept>
 #include <memory>
 #include <expected>
-#include <print>
 #include <cctype>
 
 #include "Context.hpp"
@@ -22,15 +21,17 @@ enum class ShaderStage {
 // every conversion site a compiler error instead of silently aliasing the new
 // stage onto FRAGMENT, which is what the old `stage == VERTEX ? ... : ...`
 // ternaries scattered across Pipeline.hpp and CommandBuffer.hpp would have done.
-inline VkShaderStageFlagBits to_vk(ShaderStage stage) {
+inline constexpr VkShaderStageFlagBits to_vk(ShaderStage stage) {
     switch (stage) {
         case ShaderStage::VERTEX:   return VK_SHADER_STAGE_VERTEX_BIT;
         case ShaderStage::FRAGMENT: return VK_SHADER_STAGE_FRAGMENT_BIT;
     }
-    return VK_SHADER_STAGE_VERTEX_BIT;  // unreachable; silences -Wreturn-type
+    // Not std::unreachable(): pybind enums accept arbitrary ints, so a forged
+    // ShaderStage from Python must degrade gracefully, not invoke UB.
+    return VK_SHADER_STAGE_VERTEX_BIT;
 }
 
-inline shaderc_shader_kind to_shaderc_kind(ShaderStage stage) {
+inline constexpr shaderc_shader_kind to_shaderc_kind(ShaderStage stage) {
     switch (stage) {
         case ShaderStage::VERTEX:   return shaderc_glsl_vertex_shader;
         case ShaderStage::FRAGMENT: return shaderc_glsl_fragment_shader;
@@ -44,9 +45,7 @@ public:
         : context_(context), module_(module), path_(path) {}
 
     ~ShaderModule() {
-        if (module_ != VK_NULL_HANDLE && context_) {
-            vkDestroyShaderModule(context_->device(), module_, nullptr);
-        }
+        destroy();
     }
 
     ShaderModule(const ShaderModule&) = delete;
@@ -59,9 +58,7 @@ public:
 
     ShaderModule& operator=(ShaderModule&& other) noexcept {
         if (this != &other) {
-            if (module_ != VK_NULL_HANDLE && context_) {
-                vkDestroyShaderModule(context_->device(), module_, nullptr);
-            }
+            destroy();
             context_ = std::move(other.context_);
             module_ = other.module_;
             path_ = std::move(other.path_);
@@ -74,6 +71,12 @@ public:
     const std::string& path() const { return path_; }
 
 private:
+    void destroy() {
+        if (module_ != VK_NULL_HANDLE && context_) {
+            vkDestroyShaderModule(context_->device(), module_, nullptr);
+        }
+    }
+
     std::shared_ptr<Context> context_;
     VkShaderModule module_;
     std::string path_;
@@ -87,7 +90,7 @@ public:
             return std::unexpected(err_resource("Failed to open shader file: " + source_path));
         }
 
-        size_t fileSize = (size_t)file.tellg();
+        size_t fileSize = static_cast<size_t>(file.tellg());
         std::vector<char> buffer(fileSize);
         file.seekg(0);
         file.read(buffer.data(), fileSize);

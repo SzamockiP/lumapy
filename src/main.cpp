@@ -2,9 +2,11 @@
 #include <pybind11/functional.h>
 #include <pybind11/stl.h>
 #include <pybind11/numpy.h>
-#include <print>
 #include <atomic>
+#include <cstddef>
 #include <expected>
+#include <format>
+#include <span>
 #include <chrono>
 
 #ifdef _WIN32
@@ -118,6 +120,74 @@ T unwrap(std::expected<T, Error>&& result, Logger* logger)
     raise_error(result.error());
 }
 
+void unwrap(std::expected<void, Error>&& result, Logger* logger)
+{
+    if (result)
+    {
+        return;
+    }
+    if (logger)
+    {
+        logger->log(result.error());
+    }
+    raise_error(result.error());
+}
+
+// Resolves a list's element type from the explicit argument or the first
+// element. `int_default` is the caller's policy: create_buffer infers UINT32
+// for integers going into an INDEX buffer, update infers INT32 — a deliberate
+// difference, not drift.
+DataType resolve_data_type(const py::list& list, std::optional<DataType> requested,
+                           DataType int_default)
+{
+    if (requested.has_value())
+    {
+        return requested.value();
+    }
+    if (py::isinstance<py::float_>(list[0]))
+    {
+        return DataType::FLOAT;
+    }
+    if (py::isinstance<py::int_>(list[0]))
+    {
+        return int_default;
+    }
+    raise_error(err_resource("Could not infer data type from list elements"));
+}
+
+// Calls fn(data, nbytes) with the list packed as the requested element type.
+// This four-way ladder used to be written out twice (Buffer.update and
+// Context.create_buffer) and had already diverged once: update lacked UINT16.
+template <typename F>
+auto with_list_bytes(const py::list& list, DataType type, F&& fn)
+{
+    const size_t count = list.size();
+    switch (type)
+    {
+    case DataType::FLOAT: {
+        std::vector<float> data(count);
+        for (size_t i = 0; i < count; ++i) data[i] = list[i].cast<float>();
+        return fn(data.data(), count * sizeof(float));
+    }
+    case DataType::UINT32: {
+        std::vector<uint32_t> data(count);
+        for (size_t i = 0; i < count; ++i) data[i] = list[i].cast<uint32_t>();
+        return fn(data.data(), count * sizeof(uint32_t));
+    }
+    case DataType::UINT16: {
+        std::vector<uint16_t> data(count);
+        for (size_t i = 0; i < count; ++i) data[i] = list[i].cast<uint16_t>();
+        return fn(data.data(), count * sizeof(uint16_t));
+    }
+    case DataType::INT32: {
+        std::vector<int32_t> data(count);
+        for (size_t i = 0; i < count; ++i) data[i] = list[i].cast<int32_t>();
+        return fn(data.data(), count * sizeof(int32_t));
+    }
+    }
+    raise_error(err_resource("Unknown data type"));
+}
+
 // True when the buffer's bytes are packed in C order.
 //
 // Dimensions of extent 1 are skipped: their stride is unconstrained and numpy
@@ -149,9 +219,9 @@ size_t contiguous_nbytes(const py::buffer_info& info, const char* what)
 {
     if (!is_c_contiguous(info))
     {
-        raise_error(err_resource(
-            std::string(what) + " requires a C-contiguous array, got a strided view "
-            "(e.g. arr.T or arr[::2]). Pass numpy.ascontiguousarray(arr) instead."));
+        raise_error(err_resource(std::format(
+            "{} requires a C-contiguous array, got a strided view "
+            "(e.g. arr.T or arr[::2]). Pass numpy.ascontiguousarray(arr) instead.", what)));
     }
     return static_cast<size_t>(info.size) * static_cast<size_t>(info.itemsize);
 }
@@ -164,6 +234,8 @@ const char* severity_name(Severity severity)
     case Severity::Warning: return "WARNING";
     case Severity::Error:   return "ERROR";
     }
+    // Not std::unreachable(): pybind enums accept arbitrary ints, so a forged
+    // Severity from Python must degrade gracefully, not invoke UB.
     return "INFO";
 }
 
@@ -173,7 +245,7 @@ ValidationMode parse_validation(const std::string& value)
     if (value == "on")   return ValidationMode::On;
     if (value == "off")  return ValidationMode::Off;
     throw std::invalid_argument(
-        "validation must be one of 'auto', 'on', 'off' (got '" + value + "')");
+        std::format("validation must be one of 'auto', 'on', 'off' (got '{}')", value));
 }
 
 // A Context built without a logger used to render with validation off and say
@@ -184,14 +256,17 @@ std::shared_ptr<Logger> make_default_logger()
     logger->register_callback(py::cpp_function([](const LogMessage& msg) {
         py::object stderr_stream = py::module_::import("sys").attr("stderr");
         stderr_stream.attr("write")(
-            std::string("[bazalt] ") + severity_name(msg.severity) + ": " + msg.text + "\n");
+            std::format("[bazalt] {}: {}\n", severity_name(msg.severity), msg.text));
     }));
     return logger;
 }
 
-}  // namespace
-void SwapchainRenderer::submit(std::shared_ptr<CommandBuffer> cmd) {
-    VkCommandBuffer vkCmd = cmd->get(current_frame());
+// Reset, begin, replay and end the per-frame VkCommandBuffer. Shared by the
+// swapchain and headless submit paths, which only differ in what happens to
+// the recorded buffer afterwards.
+VkCommandBuffer record_frame(CommandBuffer& cmd, std::uint32_t frame_index)
+{
+    VkCommandBuffer vkCmd = cmd.get(frame_index);
     vkResetCommandBuffer(vkCmd, 0);
 
     VkCommandBufferBeginInfo beginInfo{
@@ -200,40 +275,27 @@ void SwapchainRenderer::submit(std::shared_ptr<CommandBuffer> cmd) {
         .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT,
         .pInheritanceInfo = nullptr
     };
-    
+
     if (auto e = check(vkBeginCommandBuffer(vkCmd, &beginInfo), "begin recording command buffer")) {
         raise_error(*e);
     }
 
-    cmd->execute(vkCmd, FrameContext{ current_frame() });
+    cmd.execute(vkCmd, FrameContext{ frame_index });
 
     if (auto e = check(vkEndCommandBuffer(vkCmd), "record command buffer")) {
         raise_error(*e);
     }
 
-    end_frame(vkCmd);
+    return vkCmd;
+}
+
+}  // namespace
+void SwapchainRenderer::submit(std::shared_ptr<CommandBuffer> cmd) {
+    end_frame(record_frame(*cmd, current_frame()));
 }
 
 void context_submit(Context& context, std::shared_ptr<CommandBuffer> cmd) {
-    VkCommandBuffer vkCmd = cmd->get(context.current_frame());
-    vkResetCommandBuffer(vkCmd, 0);
-
-    VkCommandBufferBeginInfo beginInfo{
-        .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
-        .pNext = nullptr,
-        .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT,
-        .pInheritanceInfo = nullptr
-    };
-
-    if (auto e = check(vkBeginCommandBuffer(vkCmd, &beginInfo), "begin recording command buffer")) {
-        raise_error(*e);
-    }
-
-    cmd->execute(vkCmd, FrameContext{ context.current_frame() });
-
-    if (auto e = check(vkEndCommandBuffer(vkCmd), "record command buffer")) {
-        raise_error(*e);
-    }
+    VkCommandBuffer vkCmd = record_frame(*cmd, context.current_frame());
 
     VkSubmitInfo submitInfo{
         .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO,
@@ -254,7 +316,9 @@ void context_submit(Context& context, std::shared_ptr<CommandBuffer> cmd) {
 
     // Blocking. There is no swapchain to pace against here, and 0.5's timeline
     // semaphores are what make this asynchronous.
-    vkQueueWaitIdle(context.graphics_queue());
+    if (auto e = check(vkQueueWaitIdle(context.graphics_queue()), "wait for submitted command buffer")) {
+        raise_error(*e);
+    }
 }
 
 
@@ -285,10 +349,10 @@ PYBIND11_MODULE(_core, m) {
         .def_readonly("source", &LogMessage::source)
         .def_readonly("text", &LogMessage::text)
         .def("__str__", [](const LogMessage& msg) {
-            return std::string(severity_name(msg.severity)) + ": " + msg.text;
+            return std::format("{}: {}", severity_name(msg.severity), msg.text);
         })
         .def("__repr__", [](const LogMessage& msg) {
-            return std::string("<LogMessage ") + severity_name(msg.severity) + " '" + msg.text + "'>";
+            return std::format("<LogMessage {} '{}'>", severity_name(msg.severity), msg.text);
         });
 
     // Capabilities, not versions/extensions: the same capability has different
@@ -353,48 +417,19 @@ PYBIND11_MODULE(_core, m) {
 
     py::class_<Buffer, std::shared_ptr<Buffer>>(m, "Buffer")
         .def("update", [](Buffer& buffer, std::string_view data) {
-            buffer.update(data.data(), data.size());
+            unwrap(buffer.update(std::as_bytes(std::span(data.data(), data.size()))), nullptr);
         })
         .def("update", [](Buffer& buffer, py::buffer b) {
             py::buffer_info info = b.request();
-            buffer.update(info.ptr, contiguous_nbytes(info, "Buffer.update"));
+            const size_t nbytes = contiguous_nbytes(info, "Buffer.update");
+            unwrap(buffer.update({static_cast<const std::byte*>(info.ptr), nbytes}), nullptr);
         })
-        .def("update", [](Buffer& buffer, py::list list, std::optional<DataType> dataType = std::nullopt) {
+        .def("update", [](Buffer& buffer, py::list list, std::optional<DataType> dataType) {
             if (list.empty()) return;
-            
-            DataType actualType = DataType::FLOAT;
-            if (dataType.has_value()) {
-                actualType = dataType.value();
-            } else {
-                if (py::isinstance<py::float_>(list[0])) {
-                    actualType = DataType::FLOAT;
-                } else if (py::isinstance<py::int_>(list[0])) {
-                    actualType = DataType::INT32;
-                } else {
-                    raise_error(err_resource("Could not infer data type from list elements"));
-                }
-            }
-
-            size_t count = list.size();
-            if (actualType == DataType::FLOAT) {
-                std::vector<float> data(count);
-                for(size_t i=0; i<count; ++i) data[i] = list[i].cast<float>();
-                buffer.update(data.data(), count * sizeof(float));
-            } else if (actualType == DataType::UINT32) {
-                std::vector<uint32_t> data(count);
-                for(size_t i=0; i<count; ++i) data[i] = list[i].cast<uint32_t>();
-                buffer.update(data.data(), count * sizeof(uint32_t));
-            } else if (actualType == DataType::UINT16) {
-                // create_buffer accepted UINT16 while update rejected it, so a
-                // UINT16 buffer could be created and then never written to.
-                std::vector<uint16_t> data(count);
-                for(size_t i=0; i<count; ++i) data[i] = list[i].cast<uint16_t>();
-                buffer.update(data.data(), count * sizeof(uint16_t));
-            } else if (actualType == DataType::INT32) {
-                std::vector<int32_t> data(count);
-                for(size_t i=0; i<count; ++i) data[i] = list[i].cast<int32_t>();
-                buffer.update(data.data(), count * sizeof(int32_t));
-            }
+            DataType actualType = resolve_data_type(list, dataType, DataType::INT32);
+            with_list_bytes(list, actualType, [&](const void* data, size_t nbytes) {
+                unwrap(buffer.update({static_cast<const std::byte*>(data), nbytes}), nullptr);
+            });
         }, py::arg("list"), py::arg("data_type") = py::none());
     
     py::class_<ShaderModule, std::shared_ptr<ShaderModule>>(m, "ShaderModule");
@@ -405,20 +440,40 @@ PYBIND11_MODULE(_core, m) {
 
     py::class_<Pipeline, std::shared_ptr<Pipeline>>(m, "Pipeline");
 
+    // Lambdas, not member pointers: the setters take a deducing-this object
+    // parameter, so &PipelineBuilder::vertex_shader would be a plain function
+    // pointer that .def() cannot treat as a method.
     py::class_<PipelineBuilder, std::shared_ptr<PipelineBuilder>>(m, "PipelineBuilder")
-        .def("vertex_shader", &PipelineBuilder::vertexShader)
-        .def("fragment_shader", &PipelineBuilder::fragmentShader)
-        .def("vertex_format", &PipelineBuilder::vertexFormat)
-        .def("depth_test", &PipelineBuilder::depthTest)
-        .def("cull_mode", &PipelineBuilder::cullMode)
-        .def("blend", &PipelineBuilder::blend)
-        .def("push_constant", &PipelineBuilder::pushConstant)
-        .def("uniform_buffer", &PipelineBuilder::uniformBuffer,
-             py::arg("binding"), py::arg("stage"), py::arg("set"))
-        .def("storage_buffer", &PipelineBuilder::storageBuffer,
-             py::arg("binding"), py::arg("stage"), py::arg("set"))
-        .def("texture", &PipelineBuilder::texture,
-             py::arg("binding"), py::arg("stage"), py::arg("set"))
+        .def("vertex_shader", [](PipelineBuilder& self, std::shared_ptr<ShaderModule> shader) -> PipelineBuilder& {
+            return self.vertex_shader(std::move(shader));
+        })
+        .def("fragment_shader", [](PipelineBuilder& self, std::shared_ptr<ShaderModule> shader) -> PipelineBuilder& {
+            return self.fragment_shader(std::move(shader));
+        })
+        .def("vertex_format", [](PipelineBuilder& self, const std::vector<VertexFormat>& formats) -> PipelineBuilder& {
+            return self.vertex_format(formats);
+        })
+        .def("depth_test", [](PipelineBuilder& self, bool enable) -> PipelineBuilder& {
+            return self.depth_test(enable);
+        })
+        .def("cull_mode", [](PipelineBuilder& self, CullMode mode, FrontFace frontFace) -> PipelineBuilder& {
+            return self.cull_mode(mode, frontFace);
+        })
+        .def("blend", [](PipelineBuilder& self, bool enable) -> PipelineBuilder& {
+            return self.blend(enable);
+        })
+        .def("push_constant", [](PipelineBuilder& self, uint32_t size, ShaderStage stage) -> PipelineBuilder& {
+            return self.push_constant(size, stage);
+        })
+        .def("uniform_buffer", [](PipelineBuilder& self, uint32_t binding, ShaderStage stage, uint32_t set) -> PipelineBuilder& {
+            return self.uniform_buffer(binding, stage, set);
+        }, py::arg("binding"), py::arg("stage"), py::arg("set"))
+        .def("storage_buffer", [](PipelineBuilder& self, uint32_t binding, ShaderStage stage, uint32_t set) -> PipelineBuilder& {
+            return self.storage_buffer(binding, stage, set);
+        }, py::arg("binding"), py::arg("stage"), py::arg("set"))
+        .def("texture", [](PipelineBuilder& self, uint32_t binding, ShaderStage stage, uint32_t set) -> PipelineBuilder& {
+            return self.texture(binding, stage, set);
+        }, py::arg("binding"), py::arg("stage"), py::arg("set"))
         // Takes any RenderTarget. A SwapchainRenderer *is* one, so windowed code
         // reads the same as offscreen code — build(renderer) still works, it just
         // isn't a special case any more.
@@ -427,47 +482,49 @@ PYBIND11_MODULE(_core, m) {
         }, py::arg("target"));
 
     py::class_<DescriptorSet, std::shared_ptr<DescriptorSet>>(m, "DescriptorSet")
-        .def("set_texture", &DescriptorSet::setTexture,
-             py::arg("binding"), py::arg("texture"))
-        .def("set_buffer", &DescriptorSet::setBuffer,
-             py::arg("binding"), py::arg("buffer"));
+        .def("set_texture", [](DescriptorSet& self, uint32_t binding, std::shared_ptr<Texture> texture) {
+            unwrap(self.set_texture(binding, std::move(texture)), nullptr);
+        }, py::arg("binding"), py::arg("texture"))
+        .def("set_buffer", [](DescriptorSet& self, uint32_t binding, std::shared_ptr<Buffer> buffer) {
+            unwrap(self.set_buffer(binding, std::move(buffer)), nullptr);
+        }, py::arg("binding"), py::arg("buffer"));
 
     py::class_<DescriptorPool, std::shared_ptr<DescriptorPool>>(m, "DescriptorPool")
         .def("allocate_set", [](DescriptorPool& pool, std::shared_ptr<Pipeline> pipeline, uint32_t setIndex) -> py::object {
-            return py::cast(unwrap(pool.allocateDescriptorSet(pipeline, setIndex), pool.logger().get()));
+            return py::cast(unwrap(pool.allocate_descriptor_set(pipeline, setIndex), pool.logger().get()));
         }, py::arg("pipeline"), py::arg("set"))
         .def("allocate_frame_set", [](DescriptorPool& pool, std::shared_ptr<Pipeline> pipeline, uint32_t setIndex) -> py::object {
-            return py::cast(unwrap(pool.allocateFrameDescriptorSet(pipeline, setIndex), pool.logger().get()));
+            return py::cast(unwrap(pool.allocate_frame_descriptor_set(pipeline, setIndex), pool.logger().get()));
         }, py::arg("pipeline"), py::arg("set"));
 
     py::class_<CommandBuffer, std::shared_ptr<CommandBuffer>>(m, "CommandBuffer")
         .def("begin", &CommandBuffer::begin)
         // The target is required. begin_rendering() silently meaning "the
         // swapchain" made presentation a special case disguised as the default.
-        .def("begin_rendering", &CommandBuffer::beginRendering,
+        .def("begin_rendering", &CommandBuffer::begin_rendering,
              py::arg("target"), py::arg("clear_color") = std::vector<float>{0.0f, 0.0f, 0.0f, 1.0f})
-        .def("end_rendering", &CommandBuffer::endRendering, py::arg("target"))
+        .def("end_rendering", &CommandBuffer::end_rendering, py::arg("target"))
         // The no-argument versions are gone: begin_rendering emits a full-target
         // viewport and scissor itself. These remain for split-screen and similar.
-        .def("set_viewport", &CommandBuffer::setViewport,
+        .def("set_viewport", &CommandBuffer::set_viewport,
              py::arg("x"), py::arg("y"), py::arg("width"), py::arg("height"))
-        .def("set_scissor", &CommandBuffer::setScissor,
+        .def("set_scissor", &CommandBuffer::set_scissor,
              py::arg("x"), py::arg("y"), py::arg("width"), py::arg("height"))
-        .def("bind_pipeline", &CommandBuffer::bindPipeline, py::arg("pipeline"))
-        .def("bind_vertex_buffer", &CommandBuffer::bindVertexBuffer, py::arg("buffer"))
-        .def("bind_index_buffer", &CommandBuffer::bindIndexBuffer, py::arg("buffer"))
+        .def("bind_pipeline", &CommandBuffer::bind_pipeline, py::arg("pipeline"))
+        .def("bind_vertex_buffer", &CommandBuffer::bind_vertex_buffer, py::arg("buffer"))
+        .def("bind_index_buffer", &CommandBuffer::bind_index_buffer, py::arg("buffer"))
         .def("draw", &CommandBuffer::draw, py::arg("vertex_count"))
-        .def("draw_indexed", &CommandBuffer::drawIndexed,
+        .def("draw_indexed", &CommandBuffer::draw_indexed,
              py::arg("index_count"), py::arg("first_index") = 0, py::arg("vertex_offset") = 0)
-        .def("draw_indexed_instanced", &CommandBuffer::drawIndexedInstanced,
+        .def("draw_indexed_instanced", &CommandBuffer::draw_indexed_instanced,
              py::arg("index_count"), py::arg("instance_count"),
              py::arg("first_index") = 0, py::arg("vertex_offset") = 0)
         // No stage argument: the Pipeline already records which stages its push
         // constant range covers, so repeating it could only ever be wrong.
         .def("push_constants", [](CommandBuffer& cmd, std::shared_ptr<Pipeline> pipeline, uint32_t offset, std::string_view data) {
-            cmd.pushConstants(pipeline, offset, static_cast<uint32_t>(data.size()), data.data());
+            cmd.push_constants(pipeline, offset, static_cast<uint32_t>(data.size()), data.data());
         }, py::arg("pipeline"), py::arg("offset"), py::arg("data"))
-        .def("bind_descriptor_set", &CommandBuffer::bindDescriptorSet,
+        .def("bind_descriptor_set", &CommandBuffer::bind_descriptor_set,
              py::arg("descriptor_set"), py::arg("pipeline"), py::arg("set"));
 
     // ── Window (GLFW) ──
@@ -545,43 +602,13 @@ PYBIND11_MODULE(_core, m) {
                 raise_error(err_resource("Cannot create buffer from empty list"));
             }
 
-            size_t count = list.size();
-            DataType actualType = DataType::FLOAT;
+            DataType actualType = resolve_data_type(
+                list, dataType, type == BufferType::INDEX ? DataType::UINT32 : DataType::INT32);
 
-            if (dataType.has_value()) {
-                actualType = dataType.value();
-            } else {
-                if (py::isinstance<py::float_>(list[0])) {
-                    actualType = DataType::FLOAT;
-                } else if (py::isinstance<py::int_>(list[0])) {
-                    actualType = (type == BufferType::INDEX) ? DataType::UINT32 : DataType::INT32;
-                } else {
-                    raise_error(err_resource("Could not infer data type from list elements"));
-                }
-            }
-
-            std::expected<std::shared_ptr<Buffer>, Error> res = std::unexpected(err_resource("Unknown data type"));
-
-            if (actualType == DataType::FLOAT) {
-                std::vector<float> data(count);
-                for(size_t i=0; i<count; ++i) data[i] = list[i].cast<float>();
-                res = Buffer::create(self, data.data(), count * sizeof(float), type, usage);
-            } else if (actualType == DataType::UINT32) {
-                std::vector<uint32_t> data(count);
-                for(size_t i=0; i<count; ++i) data[i] = list[i].cast<uint32_t>();
-                res = Buffer::create(self, data.data(), count * sizeof(uint32_t), type, usage);
-            } else if (actualType == DataType::UINT16) {
-                std::vector<uint16_t> data(count);
-                for(size_t i=0; i<count; ++i) data[i] = list[i].cast<uint16_t>();
-                res = Buffer::create(self, data.data(), count * sizeof(uint16_t), type, usage);
-            } else if (actualType == DataType::INT32) {
-                std::vector<int32_t> data(count);
-                for(size_t i=0; i<count; ++i) data[i] = list[i].cast<int32_t>();
-                res = Buffer::create(self, data.data(), count * sizeof(int32_t), type, usage);
-            }
-
-            auto buffer = unwrap(std::move(res), self.logger().get());
-            // Recorded so bindIndexBuffer can pick VK_INDEX_TYPE_UINT16 vs UINT32
+            auto buffer = with_list_bytes(list, actualType, [&](const void* data, size_t nbytes) {
+                return unwrap(Buffer::create(self, data, nbytes, type, usage), self.logger().get());
+            });
+            // Recorded so bind_index_buffer can pick VK_INDEX_TYPE_UINT16 vs UINT32
             // instead of assuming.
             buffer->set_data_type(actualType);
             return py::cast(buffer);

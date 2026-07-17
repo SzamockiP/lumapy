@@ -10,6 +10,10 @@ You can install `bazalt` easily via `pip`:
 pip install bazalt
 ```
 
+Prebuilt wheels are provided for Windows and Linux. Building from source
+requires a C++23 compiler — GCC 14+ or MSVC 19.36+ (Visual Studio 17.6) —
+and the Vulkan SDK.
+
 ## Key Features
 
 - **Modern Graphics API:** Built on top of Vulkan for optimal hardware utilization.

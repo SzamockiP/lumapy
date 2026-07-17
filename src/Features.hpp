@@ -1,7 +1,9 @@
 #pragma once
 #include <volk.h>
 
+#include <algorithm>
 #include <array>
+#include <format>
 #include <string>
 #include <string_view>
 
@@ -50,36 +52,34 @@ inline constexpr std::array<FeatureInfo, 7> kFeatureTable{ {
 	{ Feature::SHADER_FLOAT64,        "SHADER_FLOAT64",        &VkPhysicalDeviceFeatures::shaderFloat64 },
 } };
 
-inline const FeatureInfo& feature_info(Feature feature)
+inline constexpr const FeatureInfo& feature_info(Feature feature)
 {
-	for (const auto& info : kFeatureTable)
-	{
-		if (info.feature == feature)
-		{
-			return info;
-		}
-	}
-	return kFeatureTable[0];  // unreachable: the table covers the enum
+	auto it = std::ranges::find(kFeatureTable, feature, &FeatureInfo::feature);
+	// The table covers the enum, but the input can be forged from Python
+	// (pybind enums accept arbitrary ints), so a safe fallback beats
+	// std::unreachable here.
+	return it != kFeatureTable.end() ? *it : kFeatureTable[0];
 }
 
-inline std::string_view feature_name(Feature feature)
+inline constexpr std::string_view feature_name(Feature feature)
 {
 	return feature_info(feature).name;
 }
 
-inline bool feature_available(const VkPhysicalDeviceFeatures& available, Feature feature)
+inline constexpr bool feature_available(const VkPhysicalDeviceFeatures& available, Feature feature)
 {
 	return available.*(feature_info(feature).bit) == VK_TRUE;
 }
 
-inline void enable_feature(VkPhysicalDeviceFeatures& features, Feature feature)
+inline constexpr void enable_feature(VkPhysicalDeviceFeatures& features, Feature feature)
 {
 	features.*(feature_info(feature).bit) = VK_TRUE;
 }
 
 inline std::string api_version_string(std::uint32_t version)
 {
-	return std::to_string(VK_API_VERSION_MAJOR(version)) + "." +
-	       std::to_string(VK_API_VERSION_MINOR(version)) + "." +
-	       std::to_string(VK_API_VERSION_PATCH(version));
+	return std::format("{}.{}.{}",
+	                   VK_API_VERSION_MAJOR(version),
+	                   VK_API_VERSION_MINOR(version),
+	                   VK_API_VERSION_PATCH(version));
 }

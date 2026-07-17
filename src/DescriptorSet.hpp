@@ -1,10 +1,10 @@
 #pragma once
 #include <volk.h>
-#include <vector>
-#include <memory>
 #include <expected>
-#include <stdexcept>
+#include <format>
+#include <memory>
 #include <unordered_map>
+#include <vector>
 #include "Context.hpp"
 #include "Pipeline.hpp"
 #include "Texture.hpp"
@@ -19,8 +19,22 @@ public:
           binding_types_(std::move(bindingTypes)), is_frame_set_(isFrameSet) {}
 
     // Write a texture to this descriptor set (all copies)
-    void setTexture(uint32_t binding, std::shared_ptr<Texture> texture) {
-        if (!context_) return;
+    std::expected<void, Error> set_texture(uint32_t binding, std::shared_ptr<Texture> texture) {
+        if (!context_) return std::unexpected(err_init("Context destroyed"));
+        if (!texture) return std::unexpected(err_resource("set_texture: texture is null"));
+
+        // A typo in the binding index used to surface only as a validation error
+        // at submit time (or not at all with the layers off). Diagnose it here.
+        auto it = binding_types_.find(binding);
+        if (it == binding_types_.end()) {
+            return std::unexpected(err_resource(std::format(
+                "Binding {} does not exist in this descriptor set's layout", binding)));
+        }
+        if (it->second != VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER) {
+            return std::unexpected(err_resource(std::format(
+                "Binding {} is not a sampler binding; use set_buffer() for buffer bindings",
+                binding)));
+        }
 
         VkDescriptorImageInfo imageInfo{
             .sampler = texture->sampler(),
@@ -44,24 +58,36 @@ public:
             vkUpdateDescriptorSets(context_->device(), 1, &write, 0, nullptr);
         }
         textures_.push_back(texture);
+        return {};
     }
 
     // Write a buffer to this descriptor set
     // For frame descriptor sets + DynamicBuffer: writes per-frame buffer to each copy
-    // For static descriptor sets + DynamicBuffer: throws RuntimeError
-    void setBuffer(uint32_t binding, std::shared_ptr<Buffer> buffer) {
-        if (!context_) return;
+    // For static descriptor sets + DynamicBuffer: bz.ResourceError
+    std::expected<void, Error> set_buffer(uint32_t binding, std::shared_ptr<Buffer> buffer) {
+        if (!context_) return std::unexpected(err_init("Context destroyed"));
+        if (!buffer) return std::unexpected(err_resource("set_buffer: buffer is null"));
 
         if (!is_frame_set_ && buffer->is_dynamic()) {
-            throw std::runtime_error(
-                "Cannot bind DynamicBuffer to a static DescriptorSet. "
-                "Use allocateFrameDescriptorSet() instead.");
+            return std::unexpected(err_resource(
+                "Cannot bind a DYNAMIC buffer to a static DescriptorSet. "
+                "Use allocate_frame_set() instead."));
         }
 
+        // No silent fallback: an unknown binding used to be *assumed* to be a
+        // UNIFORM_BUFFER, so a typo'd index produced a descriptor write the
+        // layout never declared — garbage diagnosed (at best) at submit time.
         auto it = binding_types_.find(binding);
-        VkDescriptorType descType = (it != binding_types_.end()) 
-            ? it->second 
-            : VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+        if (it == binding_types_.end()) {
+            return std::unexpected(err_resource(std::format(
+                "Binding {} does not exist in this descriptor set's layout", binding)));
+        }
+        const VkDescriptorType descType = it->second;
+        if (descType == VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER) {
+            return std::unexpected(err_resource(std::format(
+                "Binding {} is a sampler binding; use set_texture() for texture bindings",
+                binding)));
+        }
 
         for (size_t i = 0; i < sets_.size(); i++) {
             VkBuffer vkBuf = buffer->get_for_frame(static_cast<uint32_t>(i));
@@ -86,6 +112,7 @@ public:
             vkUpdateDescriptorSets(context_->device(), 1, &write, 0, nullptr);
         }
         buffers_.push_back(buffer);
+        return {};
     }
 
     // Get the VkDescriptorSet for the given frame
@@ -171,7 +198,7 @@ public:
 
     // Allocate a static descriptor set (1 VkDescriptorSet)
     std::expected<std::shared_ptr<DescriptorSet>, Error>
-    allocateDescriptorSet(std::shared_ptr<Pipeline> pipeline, uint32_t setIndex) {
+    allocate_descriptor_set(std::shared_ptr<Pipeline> pipeline, uint32_t setIndex) {
         if (!context_) return std::unexpected(err_init("Context destroyed"));
 
         VkDescriptorSetLayout layout = pipeline->descriptor_set_layout(setIndex);
@@ -200,7 +227,7 @@ public:
 
     // Allocate a frame descriptor set (MAX_FRAMES_IN_FLIGHT VkDescriptorSets)
     std::expected<std::shared_ptr<DescriptorSet>, Error>
-    allocateFrameDescriptorSet(std::shared_ptr<Pipeline> pipeline, uint32_t setIndex) {
+    allocate_frame_descriptor_set(std::shared_ptr<Pipeline> pipeline, uint32_t setIndex) {
         if (!context_) return std::unexpected(err_init("Context destroyed"));
 
         VkDescriptorSetLayout layout = pipeline->descriptor_set_layout(setIndex);

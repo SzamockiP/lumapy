@@ -4,13 +4,12 @@
 #include <vk_mem_alloc.h>
 
 #include <expected>
+#include <format>
 #include <memory>
 #include <vector>
 #include <string>
 #include <algorithm>
 #include <limits>
-#include <print>
-#include <iostream>
 
 #include "Context.hpp"
 #include "RenderTarget.hpp"
@@ -45,21 +44,16 @@ inline SwapchainSupportDetails query_swapchain_support(VkPhysicalDevice device, 
 }
 
 inline VkSurfaceFormatKHR choose_swap_surface_format(const std::vector<VkSurfaceFormatKHR>& availableFormats) {
-	for (const auto& availableFormat : availableFormats) {
-		if (availableFormat.format == VK_FORMAT_B8G8R8A8_SRGB && availableFormat.colorSpace == VK_COLOR_SPACE_SRGB_NONLINEAR_KHR) {
-			return availableFormat;
-		}
-	}
-	return availableFormats[0];
+	auto it = std::ranges::find_if(availableFormats, [](const VkSurfaceFormatKHR& f) {
+		return f.format == VK_FORMAT_B8G8R8A8_SRGB && f.colorSpace == VK_COLOR_SPACE_SRGB_NONLINEAR_KHR;
+	});
+	return it != availableFormats.end() ? *it : availableFormats[0];
 }
 
 inline VkPresentModeKHR choose_swap_present_mode(const std::vector<VkPresentModeKHR>& availablePresentModes) {
-	for (const auto& availablePresentMode : availablePresentModes) {
-		if (availablePresentMode == VK_PRESENT_MODE_MAILBOX_KHR) {
-			return availablePresentMode;
-		}
-	}
-	return VK_PRESENT_MODE_FIFO_KHR;
+	return std::ranges::contains(availablePresentModes, VK_PRESENT_MODE_MAILBOX_KHR)
+		? VK_PRESENT_MODE_MAILBOX_KHR
+		: VK_PRESENT_MODE_FIFO_KHR;
 }
 
 inline VkExtent2D choose_swap_extent(const VkSurfaceCapabilitiesKHR& capabilities, int width, int height) {
@@ -129,8 +123,10 @@ public:
 
 		// Swapchain
 		auto [width, height] = renderer->surface_provider_.get_framebuffer_size();
-		if (!renderer->create_swapchain_manually(width, height)) {
-			return std::unexpected(err_init("Vulkan: Failed to create swapchain"));
+		if (auto r = renderer->create_swapchain_manually(width, height); !r) {
+			// Propagate the real Error: this used to collapse to a bare
+			// "Failed to create swapchain", discarding the VkResult that says why.
+			return std::unexpected(r.error());
 		}
 
 		// Sync Objects
@@ -171,60 +167,10 @@ public:
 		}
 
 		// Depth Image
-		VkFormat depth_format = VK_FORMAT_D32_SFLOAT;
-		renderer->depth_format_ = depth_format;
-
-		VkImageCreateInfo imageInfo{
-			.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO,
-			.pNext = nullptr,
-			.flags = 0,
-			.imageType = VK_IMAGE_TYPE_2D,
-			.format = depth_format,
-			.extent = {renderer->swapchain_extent_.width, renderer->swapchain_extent_.height, 1},
-			.mipLevels = 1,
-			.arrayLayers = 1,
-			.samples = VK_SAMPLE_COUNT_1_BIT,
-			.tiling = VK_IMAGE_TILING_OPTIMAL,
-			.usage = VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT,
-			.sharingMode = VK_SHARING_MODE_EXCLUSIVE,
-			.queueFamilyIndexCount = 0,
-			.pQueueFamilyIndices = nullptr,
-			.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED
-		};
-
-		VmaAllocationCreateInfo allocImageInfo = {};
-		allocImageInfo.usage = VMA_MEMORY_USAGE_AUTO;
-
-		if (auto e = check(vmaCreateImage(context->allocator(), &imageInfo, &allocImageInfo, &renderer->depth_image_, &renderer->depth_image_allocation_, nullptr),
-		                   "create depth image"))
+		renderer->depth_format_ = VK_FORMAT_D32_SFLOAT;
+		if (auto r = renderer->create_depth_resources(); !r)
 		{
-			return std::unexpected(*e);
-		}
-
-		VkImageViewCreateInfo viewInfo{
-			.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
-			.pNext = nullptr,
-			.flags = 0,
-			.image = renderer->depth_image_,
-			.viewType = VK_IMAGE_VIEW_TYPE_2D,
-			.format = depth_format,
-			.components = {
-				VK_COMPONENT_SWIZZLE_IDENTITY, VK_COMPONENT_SWIZZLE_IDENTITY,
-				VK_COMPONENT_SWIZZLE_IDENTITY, VK_COMPONENT_SWIZZLE_IDENTITY
-			},
-			.subresourceRange = {
-				.aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT,
-				.baseMipLevel = 0,
-				.levelCount = 1,
-				.baseArrayLayer = 0,
-				.layerCount = 1
-			}
-		};
-
-		if (auto e = check(vkCreateImageView(context->device(), &viewInfo, nullptr, &renderer->depth_image_view_),
-		                   "create depth image view"))
-		{
-			return std::unexpected(*e);
+			return std::unexpected(r.error());
 		}
 
 		context->set_has_swapchain_renderer(true);
@@ -233,10 +179,11 @@ public:
 
 	~SwapchainRenderer()
 	{
-		if (context_)
+		if (!context_)
 		{
-			context_->set_has_swapchain_renderer(false);
+			return;
 		}
+		context_->set_has_swapchain_renderer(false);
 
 		if (context_->device())
 		{
@@ -339,7 +286,8 @@ public:
 			frame_skipped_ = true;
 			return false;
 		} else if (result != VK_SUCCESS && result != VK_SUBOPTIMAL_KHR) {
-			if (auto l = context_->logger()) l->log(Severity::Error, Source::Device, "Failed to acquire swapchain image!");
+			if (auto l = context_->logger()) l->log(Severity::Error, Source::Device,
+				std::format("Failed to acquire swapchain image ({})", vk_result_name(result)));
 			frame_skipped_ = true;
 			return false;
 		}
@@ -367,8 +315,10 @@ public:
 			.pSignalSemaphores = signalSemaphores
 		};
 
-		if (vkQueueSubmit(context_->graphics_queue(), 1, &submitInfo, in_flight_fences_[current_frame()]) != VK_SUCCESS) {
-			if (auto l = context_->logger()) l->log(Severity::Error, Source::Device, "Failed to submit draw command buffer!");
+		if (VkResult submit_result = vkQueueSubmit(context_->graphics_queue(), 1, &submitInfo, in_flight_fences_[current_frame()]);
+		    submit_result != VK_SUCCESS) {
+			if (auto l = context_->logger()) l->log(Severity::Error, Source::Device,
+				std::format("Failed to submit draw command buffer ({})", vk_result_name(submit_result)));
 		}
 
 		VkPresentInfoKHR presentInfo{
@@ -421,7 +371,7 @@ private:
 
 	bool frame_skipped_ = false;
 
-	bool create_swapchain_manually(int width, int height, VkSwapchainKHR old_swapchain = VK_NULL_HANDLE)
+	std::expected<void, Error> create_swapchain_manually(int width, int height, VkSwapchainKHR old_swapchain = VK_NULL_HANDLE)
 	{
 		auto details = query_swapchain_support(context_->physical_device(), surface_);
 		auto surface_format = choose_swap_surface_format(details.formats);
@@ -466,8 +416,9 @@ private:
 		}
 
 		VkSwapchainKHR new_swapchain;
-		if (vkCreateSwapchainKHR(context_->device(), &createInfo, nullptr, &new_swapchain) != VK_SUCCESS) {
-			return false;
+		if (auto e = check(vkCreateSwapchainKHR(context_->device(), &createInfo, nullptr, &new_swapchain),
+		                   "create swapchain")) {
+			return std::unexpected(*e);
 		}
 
 		swapchain_ = new_swapchain;
@@ -505,12 +456,13 @@ private:
 				}
 			};
 
-			if (vkCreateImageView(context_->device(), &viewInfo, nullptr, &swapchain_image_views_[i]) != VK_SUCCESS) {
-				return false;
+			if (auto e = check(vkCreateImageView(context_->device(), &viewInfo, nullptr, &swapchain_image_views_[i]),
+			                   "create swapchain image view")) {
+				return std::unexpected(*e);
 			}
 		}
 
-		return true;
+		return {};
 	}
 
 	void recreate_swapchain()
@@ -543,8 +495,12 @@ private:
 
 		VkSwapchainKHR old_swapchain = swapchain_;
 		auto [width, height] = surface_provider_.get_framebuffer_size();
-		if (!create_swapchain_manually(width, height, old_swapchain)) {
-			if (auto l = context_->logger()) l->log(Severity::Error, Source::Device, "Failed to recreate swapchain manually!");
+		if (auto r = create_swapchain_manually(width, height, old_swapchain); !r) {
+			// This runs mid-frame, so it keeps the log-and-bail contract — but it
+			// logs the propagated Error (VkResult name included), not a hand-written
+			// string.
+			if (auto l = context_->logger()) l->log(Severity::Error, Source::Device,
+				"Failed to recreate swapchain: " + r.error().message);
 			return;
 		}
 
@@ -567,6 +523,21 @@ private:
 		}
 
 		// Recreate depth image
+		if (auto r = create_depth_resources(); !r) {
+			if (auto l = context_->logger()) l->log(Severity::Error, Source::Device,
+				"Failed to recreate depth resources: " + r.error().message);
+			return;
+		}
+
+		if (auto l = context_->logger()) l->log(Severity::Info, Source::Device,
+			std::format("Swapchain recreated ({}x{})", swapchain_extent_.width, swapchain_extent_.height));
+	}
+
+	// Depth image + view sized to the current swapchain extent. Shared by first
+	// creation and every recreate — it used to be ~50 lines duplicated verbatim
+	// between the two.
+	std::expected<void, Error> create_depth_resources()
+	{
 		VkImageCreateInfo imageInfo{
 			.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO,
 			.pNext = nullptr,
@@ -588,9 +559,10 @@ private:
 		VmaAllocationCreateInfo allocImageInfo = {};
 		allocImageInfo.usage = VMA_MEMORY_USAGE_AUTO;
 
-		if (vmaCreateImage(context_->allocator(), &imageInfo, &allocImageInfo, &depth_image_, &depth_image_allocation_, nullptr) != VK_SUCCESS) {
-			if (auto l = context_->logger()) l->log(Severity::Error, Source::Device, "Failed to recreate depth image");
-			return;
+		if (auto e = check(vmaCreateImage(context_->allocator(), &imageInfo, &allocImageInfo, &depth_image_, &depth_image_allocation_, nullptr),
+		                   "create depth image"))
+		{
+			return std::unexpected(*e);
 		}
 
 		VkImageViewCreateInfo viewInfo{
@@ -613,11 +585,12 @@ private:
 			}
 		};
 
-		if (vkCreateImageView(context_->device(), &viewInfo, nullptr, &depth_image_view_) != VK_SUCCESS) {
-			if (auto l = context_->logger()) l->log(Severity::Error, Source::Device, "Failed to recreate depth image view");
-			return;
+		if (auto e = check(vkCreateImageView(context_->device(), &viewInfo, nullptr, &depth_image_view_),
+		                   "create depth image view"))
+		{
+			return std::unexpected(*e);
 		}
 
-		if (auto l = context_->logger()) l->log(Severity::Info, Source::Device, "Swapchain recreated (" + std::to_string(swapchain_extent_.width) + "x" + std::to_string(swapchain_extent_.height) + ")");
+		return {};
 	}
 };

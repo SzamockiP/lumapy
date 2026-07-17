@@ -1,13 +1,16 @@
 #pragma once
 #include <volk.h>
 #include <vk_mem_alloc.h>
+#include <cstddef>
+#include <format>
 #include <span>
-#include <stdexcept>
+#include <string>
 #include <memory>
 #include <expected>
 #include <cstring>
 #include <array>
 #include "Context.hpp"
+#include "ImmediateSubmit.hpp"
 
 enum class BufferType {
     VERTEX,
@@ -37,11 +40,16 @@ public:
     virtual bool is_dynamic() const { return false; }
     virtual VkBuffer get_for_frame(uint32_t /*frame*/) const { return get(); }
 
-    virtual void update(const void* data, size_t size) {
-        throw std::runtime_error("Update not supported for this buffer type");
+    // Fails through the unified Error channel, not a raw exception: at the
+    // pybind boundary this surfaces as bz.ResourceError, so `except BazaltError`
+    // actually catches it.
+    virtual std::expected<void, Error> update(std::span<const std::byte> /*data*/) {
+        return std::unexpected(err_resource(
+            "update() is only supported on DYNAMIC buffers; "
+            "create the buffer with MemoryUsage.DYNAMIC instead"));
     }
 
-    // Remembered so bindIndexBuffer doesn't have to assume. It used to hardcode
+    // Remembered so bind_index_buffer doesn't have to assume. It used to hardcode
     // VK_INDEX_TYPE_UINT32 while create_buffer happily accepted UINT16 indices,
     // which were then read back at half the count with no error.
     DataType data_type() const { return data_type_; }
@@ -109,7 +117,11 @@ public:
 
         if (data != nullptr && data_size > 0) {
             void* mappedData;
-            vmaMapMemory(context.allocator(), stagingAllocation, &mappedData);
+            if (auto e = check(vmaMapMemory(context.allocator(), stagingAllocation, &mappedData),
+                               "map staging buffer memory", ErrorCode::Resource)) {
+                vmaDestroyBuffer(context.allocator(), stagingBuffer, stagingAllocation);
+                return std::unexpected(*e);
+            }
             std::memcpy(mappedData, data, data_size);
             vmaUnmapMemory(context.allocator(), stagingAllocation);
         }
@@ -136,52 +148,20 @@ public:
             return std::unexpected(*e);
         }
 
-        VkCommandBufferAllocateInfo allocCmdInfo{
-            .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
-            .pNext = nullptr,
-            .commandPool = context.command_pool(),
-            .level = VK_COMMAND_BUFFER_LEVEL_PRIMARY,
-            .commandBufferCount = 1
-        };
+        auto submitted = immediate_submit(context, [&](VkCommandBuffer cmd) {
+            VkBufferCopy copyRegion{
+                .srcOffset = 0,
+                .dstOffset = 0,
+                .size = data_size
+            };
+            vkCmdCopyBuffer(cmd, stagingBuffer, buffer, 1, &copyRegion);
+        });
 
-        VkCommandBuffer commandBuffer;
-        vkAllocateCommandBuffers(context.device(), &allocCmdInfo, &commandBuffer);
-
-        VkCommandBufferBeginInfo beginInfo{
-            .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
-            .pNext = nullptr,
-            .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT,
-            .pInheritanceInfo = nullptr
-        };
-
-        vkBeginCommandBuffer(commandBuffer, &beginInfo);
-
-        VkBufferCopy copyRegion{
-            .srcOffset = 0,
-            .dstOffset = 0,
-            .size = data_size
-        };
-        vkCmdCopyBuffer(commandBuffer, stagingBuffer, buffer, 1, &copyRegion);
-
-        vkEndCommandBuffer(commandBuffer);
-
-        VkSubmitInfo submitInfo{
-            .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO,
-            .pNext = nullptr,
-            .waitSemaphoreCount = 0,
-            .pWaitSemaphores = nullptr,
-            .pWaitDstStageMask = nullptr,
-            .commandBufferCount = 1,
-            .pCommandBuffers = &commandBuffer,
-            .signalSemaphoreCount = 0,
-            .pSignalSemaphores = nullptr
-        };
-
-        vkQueueSubmit(context.graphics_queue(), 1, &submitInfo, VK_NULL_HANDLE);
-        vkQueueWaitIdle(context.graphics_queue());
-
-        vkFreeCommandBuffers(context.device(), context.command_pool(), 1, &commandBuffer);
         vmaDestroyBuffer(context.allocator(), stagingBuffer, stagingAllocation);
+        if (!submitted) {
+            vmaDestroyBuffer(context.allocator(), buffer, allocation);
+            return std::unexpected(submitted.error());
+        }
 
         return std::make_shared<StaticBuffer>(context.shared_from_this(), buffer, allocation, data_size);
     }
@@ -224,18 +204,21 @@ public:
     VkBuffer get_for_frame(uint32_t frame) const override { return buffers_[frame]; }
     BufferType buffer_type() const { return type_; }
 
-    void update(const void* data, size_t size) override {
-        if (size > size_) {
-            throw std::runtime_error("Update size exceeds buffer size");
+    std::expected<void, Error> update(std::span<const std::byte> data) override {
+        if (data.size() > size_) {
+            return std::unexpected(err_resource(
+                std::format("Update of {} bytes exceeds the buffer size of {} bytes",
+                            data.size(), size_)));
         }
         uint32_t frame = context_->current_frame();
         void* mappedData;
-        if (vmaMapMemory(context_->allocator(), allocations_[frame], &mappedData) == VK_SUCCESS) {
-            std::memcpy(mappedData, data, size);
-            vmaUnmapMemory(context_->allocator(), allocations_[frame]);
-        } else {
-            throw std::runtime_error("Failed to map memory for buffer update");
+        if (auto e = check(vmaMapMemory(context_->allocator(), allocations_[frame], &mappedData),
+                           "map dynamic buffer memory for update", ErrorCode::Resource)) {
+            return std::unexpected(*e);
         }
+        std::memcpy(mappedData, data.data(), data.size());
+        vmaUnmapMemory(context_->allocator(), allocations_[frame]);
+        return {};
     }
 
     static std::expected<std::shared_ptr<DynamicBuffer>, Error> create(Context& context, const void* data, size_t data_size, BufferType type) {

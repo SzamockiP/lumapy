@@ -1,0 +1,124 @@
+# Changelog
+
+All notable changes to **bazalt** are documented here. The format follows
+[Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow
+[SemVer](https://semver.org/) (pre-1.0: minor versions may break the API,
+patch versions never do).
+
+## [0.4.1] — 2026-07-17
+
+A source-quality release: bug fixes, refactoring, and C++23 adoption.
+No public Python API changes (one behavioural fix: `read_pixels()` on a
+never-rendered target now raises `ResourceError` instead of returning
+undefined VRAM contents).
+
+### Fixed
+- `read_pixels()` could return discarded content: the internal "has been
+  rendered to" flag was never set, so the readback barrier always declared
+  the image layout as `UNDEFINED`, which permits the driver to drop the
+  rendered pixels. The flag now flips when rendering work is actually
+  submitted, and `read_pixels()` on a never-rendered target raises
+  `ResourceError` instead of returning uninitialised VRAM.
+- `Buffer.update` on a STATIC buffer, oversized updates, and binding a
+  DYNAMIC buffer to a static `DescriptorSet` now raise `bz.ResourceError`
+  instead of a bare `RuntimeError` that `except bz.BazaltError` missed.
+- Every `VkResult` on the one-shot upload/readback path (allocate, submit,
+  wait, map) is now checked; a device loss during an upload surfaces as
+  `DeviceLostError` at the failing call instead of garbage later.
+- Swapchain creation failures propagate the real `VkResult` instead of
+  collapsing to a bare "Failed to create swapchain"; mid-frame failures
+  log the `VkResult` name.
+- `DescriptorSet.set_buffer`/`set_texture` validate the binding against
+  the pipeline layout: a typo'd binding index or a buffer/texture
+  mismatch raises `ResourceError` at the call site instead of being
+  silently written (a nonexistent binding used to be *assumed* to be a
+  uniform buffer) and diagnosed, at best, by the validation layers at
+  submit time.
+
+### Changed
+- CI now builds `release/**` branches and smoke-tests every built wheel
+  (`import bazalt` + stub consistency); the GPU test suite remains local.
+- Internal C++23 modernisation: `std::format` for diagnostics,
+  `std::ranges` for searches and folds, `constexpr` lookup tables,
+  `std::span<const std::byte>` on the buffer-update path, and deducing
+  `this` for the pipeline builder's chained setters. Building from source
+  now requires GCC 14+ or MSVC 19.36+ (prebuilt wheels are unaffected).
+
+### Added
+- Behaviour-pinning tests for previously untested bindings: non-indexed
+  `draw()`, `push_constants`, `DescriptorSet`/`DescriptorPool` end-to-end,
+  `STORAGE` buffers, `blend()`, and `load_texture` sampling.
+- This changelog.
+
+## [0.4.0] — 2026-07-16
+
+The "Foundations" release: three interdependent pillars, API breaks batched.
+
+### Added
+- **Unified error handling**: `bz.BazaltError` exception hierarchy
+  (`InitializationError`, `DeviceLostError`, `OutOfMemoryError`,
+  `ShaderError` with `.path`/`.line`, `WindowError`, `ResourceError`);
+  structured `Logger`/`LogMessage` with `severity` and `source` as data;
+  default stderr logger; GLFW diagnostics routed through `WindowError`.
+- **Feature negotiation**: `Context(features=[...], optional=[...])`,
+  `ctx.supports(Feature.X)`, `ctx.device_name`, `ctx.api_version`,
+  `ctx.headless`; Vulkan 1.2 baseline with 1.3 preferred.
+- **Headless rendering**: `bz.RenderTarget(ctx, w, h)` + `ctx.submit(cmd)` +
+  `read_pixels()`; `SwapchainRenderer` is now just one `RenderTargetBase`.
+- First pytest suite (56 tests) with validation-layers-as-assert fixture.
+
+### Changed (breaking)
+- `Logger.on_error` → `Logger.on_message` with structured `LogMessage`.
+- `begin_rendering(target, ...)` — target is now required.
+- Zero-argument `set_viewport()`/`set_scissor()` removed
+  (`begin_rendering` emits full-target versions automatically).
+- `Format` → `VertexFormat`.
+- `push_constants` no longer takes a `stage` argument.
+- `build(renderer)` → `build(target)`.
+- `create_command_buffer` moved from renderer to `Context`.
+- Non-contiguous numpy arrays now raise `ResourceError` instead of
+  silently uploading garbage.
+- `RuntimeError` replaced by the `BazaltError` hierarchy at the API boundary.
+
+## [0.3.0] — 2026-07-15
+
+### Added
+- `MemoryUsage` enum: `STATIC` (GPU-local) and `DYNAMIC` (host-visible,
+  multi-buffered, updatable per frame) for explicit control over resource
+  memory strategy.
+- Keyword arguments on all Python bindings plus `_core.pyi` stubs — IDE
+  autocompletion and type hints.
+
+### Changed
+- Core Vulkan environment (`Context`) separated from presentation
+  (`SwapchainRenderer`): the GPU can be initialised and shaders compiled
+  without creating any window.
+- Swapchain creation reimplemented on raw Vulkan calls instead of
+  vk-bootstrap, so a window can be attached after `Context` creation and
+  swapchain recreation is robust.
+
+### Fixed
+- Vulkan teardown crashes during Python garbage collection: resource
+  objects (`Buffer`, `Texture`, `Pipeline`, …) now keep the `Context`
+  alive via `std::shared_ptr`.
+
+## [0.2.0] — 2026-07-13
+
+### Added
+- Native OS window integration via `win32_hwnd` (embedding in PyQt/PySide).
+
+### Changed
+- Renderer decoupled from GLFW windowing.
+- `Logger` extracted into a standalone module.
+
+## [0.1.0] — 2026-07-08
+
+### Added
+- `DescriptorPool` and `DescriptorSet` API for custom descriptor
+  management.
+- More examples and expanded README documentation.
+
+## [0.0.1] — 2026-07-06
+
+Initial preview release: window with event handling, threaded logging
+system, and basic shader prototyping.
