@@ -309,6 +309,7 @@ void context_submit(Context& context, std::shared_ptr<CommandBuffer> cmd) {
         .pSignalSemaphores = nullptr
     };
 
+    std::lock_guard lock(context.queue_mutex());
     if (auto e = check(vkQueueSubmit(context.graphics_queue(), 1, &submitInfo, VK_NULL_HANDLE),
                        "submit command buffer")) {
         raise_error(*e);

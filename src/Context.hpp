@@ -7,6 +7,7 @@
 #include <expected>
 #include <format>
 #include <memory>
+#include <mutex>
 #include <set>
 #include <string>
 #include <vector>
@@ -185,6 +186,12 @@ public:
 	// Guards against two SwapchainRenderers fighting over current_frame_.
 	bool has_swapchain_renderer() const { return has_swapchain_renderer_; }
 	void set_has_swapchain_renderer(bool value) { has_swapchain_renderer_ = value; }
+
+	// VkQueue is externally synchronized. Today every submit happens on the main
+	// thread, so this mutex is uncontended — it exists because 0.5's upload
+	// worker submits from its own thread, and every vkQueueSubmit/Present/
+	// WaitIdle must hold it from then on.
+	std::mutex& queue_mutex() { return queue_mutex_; }
 
 private:
 	Context(std::shared_ptr<Logger> logger) : logger_(logger) {}
@@ -408,6 +415,27 @@ private:
 			ctx.enabled_features_.insert(Feature::ANISOTROPIC_FILTERING);
 		}
 
+		// Timeline semaphores pace the deletion queue and async uploads. They are
+		// core in 1.2 (our floor), so the entry points are always loaded — but the
+		// feature bit still has to be enabled at device creation, and checking it
+		// here turns a cryptic device-creation error code into a sentence.
+		VkPhysicalDeviceVulkan12Features available12{
+			.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES,
+			.pNext = nullptr
+		};
+		VkPhysicalDeviceFeatures2 available2{
+			.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2,
+			.pNext = &available12
+		};
+		vkGetPhysicalDeviceFeatures2(ctx.vkb_physical_device_.physical_device, &available2);
+		if (!available12.timelineSemaphore)
+		{
+			return std::unexpected(err_init(
+				"Vulkan: this GPU/driver does not support timeline semaphores, which "
+				"bazalt requires (they are mandatory in conformant Vulkan 1.2 drivers). "
+				"Updating the graphics driver usually fixes this."));
+		}
+
 		ctx.vkb_physical_device_.enable_features_if_present(enabled_features);
 		return {};
 	}
@@ -432,7 +460,17 @@ private:
 			.dynamicRendering = VK_TRUE
 		};
 
+		// Core in 1.2, so this rides along on both paths. No KHR aliasing needed,
+		// unlike dynamic rendering: the floor is 1.2, so the core entry points
+		// (vkWaitSemaphores etc.) are always loaded.
+		VkPhysicalDeviceVulkan12Features features12{
+			.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES,
+			.pNext = nullptr,
+			.timelineSemaphore = VK_TRUE
+		};
+
 		auto dev_builder = vkb::DeviceBuilder{ ctx.vkb_physical_device_ };
+		dev_builder.add_pNext(&features12);
 		if (ctx.dynamic_rendering_khr_)
 		{
 			dev_builder.add_pNext(&dynamic_rendering_khr);
@@ -477,7 +515,9 @@ private:
 		allocatorInfo.device = ctx.vkb_device_.device;
 		allocatorInfo.instance = ctx.vkb_instance_.instance;
 		allocatorInfo.pVulkanFunctions = &vulkanFunctions;
-		allocatorInfo.vulkanApiVersion = VK_API_VERSION_1_3;
+		// The negotiated version, not a hardcoded one: telling VMA 1.3 on the
+		// 1.2+KHR path would let it call entry points the device never promised.
+		allocatorInfo.vulkanApiVersion = ctx.negotiated_api_version_;
 
 		if (auto e = check(vmaCreateAllocator(&allocatorInfo, &ctx.allocator_),
 		                   "create VMA allocator"))
@@ -555,6 +595,7 @@ private:
 
 	VkQueue graphics_queue_ = VK_NULL_HANDLE;
 	std::uint32_t graphics_queue_family_ = 0;
+	std::mutex queue_mutex_;
 
 	VmaAllocator allocator_ = VK_NULL_HANDLE;
 	VkCommandPool command_pool_ = VK_NULL_HANDLE;

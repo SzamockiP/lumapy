@@ -2,6 +2,7 @@
 #include <volk.h>
 
 #include <expected>
+#include <mutex>
 #include <utility>
 
 #include "Context.hpp"
@@ -72,15 +73,18 @@ std::expected<void, Error> immediate_submit(Context& context, F&& record)
         .signalSemaphoreCount = 0,
         .pSignalSemaphores = nullptr
     };
-    if (auto e = check(vkQueueSubmit(context.graphics_queue(), 1, &submitInfo, VK_NULL_HANDLE),
-                       "submit one-shot command buffer", ErrorCode::Resource))
     {
-        return fail(std::move(*e));
-    }
-    if (auto e = check(vkQueueWaitIdle(context.graphics_queue()),
-                       "wait for one-shot submit", ErrorCode::Resource))
-    {
-        return fail(std::move(*e));
+        std::lock_guard lock(context.queue_mutex());
+        if (auto e = check(vkQueueSubmit(context.graphics_queue(), 1, &submitInfo, VK_NULL_HANDLE),
+                           "submit one-shot command buffer", ErrorCode::Resource))
+        {
+            return fail(std::move(*e));
+        }
+        if (auto e = check(vkQueueWaitIdle(context.graphics_queue()),
+                           "wait for one-shot submit", ErrorCode::Resource))
+        {
+            return fail(std::move(*e));
+        }
     }
 
     vkFreeCommandBuffers(context.device(), context.command_pool(), 1, &cmd);

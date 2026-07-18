@@ -6,6 +6,7 @@
 #include <expected>
 #include <format>
 #include <memory>
+#include <mutex>
 #include <vector>
 #include <string>
 #include <algorithm>
@@ -187,6 +188,7 @@ public:
 
 		if (context_->device())
 		{
+			std::lock_guard lock(context_->queue_mutex());
 			vkDeviceWaitIdle(context_->device());
 		}
 
@@ -315,12 +317,6 @@ public:
 			.pSignalSemaphores = signalSemaphores
 		};
 
-		if (VkResult submit_result = vkQueueSubmit(context_->graphics_queue(), 1, &submitInfo, in_flight_fences_[current_frame()]);
-		    submit_result != VK_SUCCESS) {
-			if (auto l = context_->logger()) l->log(Severity::Error, Source::Device,
-				std::format("Failed to submit draw command buffer ({})", vk_result_name(submit_result)));
-		}
-
 		VkPresentInfoKHR presentInfo{
 			.sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR,
 			.pNext = nullptr,
@@ -332,7 +328,20 @@ public:
 			.pResults = nullptr
 		};
 
-		VkResult result = vkQueuePresentKHR(present_queue_, &presentInfo);
+		// The lock ends before recreate_swapchain below: that path takes the
+		// device idle, which must not happen while holding the queue mutex.
+		VkResult result;
+		{
+			std::lock_guard lock(context_->queue_mutex());
+
+			if (VkResult submit_result = vkQueueSubmit(context_->graphics_queue(), 1, &submitInfo, in_flight_fences_[current_frame()]);
+			    submit_result != VK_SUCCESS) {
+				if (auto l = context_->logger()) l->log(Severity::Error, Source::Device,
+					std::format("Failed to submit draw command buffer ({})", vk_result_name(submit_result)));
+			}
+
+			result = vkQueuePresentKHR(present_queue_, &presentInfo);
+		}
 
 		if (result == VK_ERROR_OUT_OF_DATE_KHR || result == VK_SUBOPTIMAL_KHR || surface_provider_.consume_resize_flag()) {
 			recreate_swapchain();
@@ -467,7 +476,10 @@ private:
 
 	void recreate_swapchain()
 	{
-		vkDeviceWaitIdle(context_->device());
+		{
+			std::lock_guard lock(context_->queue_mutex());
+			vkDeviceWaitIdle(context_->device());
+		}
 
 		// Destroy old depth resources
 		if (depth_image_view_) {
