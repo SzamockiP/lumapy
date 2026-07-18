@@ -11,13 +11,25 @@
 #include "Sampler.hpp"
 #include "Buffer.hpp"
 
+class DescriptorPool;
+
 class DescriptorSet {
 public:
     // sets: 1 element (static) or frames_in_flight elements (frame)
-    DescriptorSet(std::shared_ptr<Context> context, std::vector<VkDescriptorSet> sets,
+    DescriptorSet(std::shared_ptr<Context> context, std::shared_ptr<DescriptorPool> pool,
+                  std::vector<VkDescriptorSet> sets,
                   Pipeline::BindingTypeMap bindingTypes, bool isFrameSet)
-        : context_(context), sets_(std::move(sets)),
+        : context_(context), pool_(std::move(pool)), sets_(std::move(sets)),
           binding_types_(std::move(bindingTypes)), is_frame_set_(isFrameSet) {}
+
+    // Frees the sets back to the pool, deferred (an in-flight frame may still
+    // have them bound). The lambda captures the RAW pool handle, never the
+    // shared_ptr — the pool holds the Context, and a shared_ptr sitting in the
+    // Context's own deletion queue would keep the Context alive from its own
+    // member. Ordering is safe without it: this object holds pool_ as a
+    // member, so the pool's (also deferred) destruction is enqueued after this
+    // free, and the queue runs in order.
+    ~DescriptorSet();
 
     // Write an image + sampler to this descriptor set (all copies).
     // sampler == nullptr means "the default": linear, repeat, anisotropic —
@@ -140,6 +152,7 @@ public:
 
 private:
     std::shared_ptr<Context> context_;
+    std::shared_ptr<DescriptorPool> pool_;  // sets must not outlive their pool
     std::vector<VkDescriptorSet> sets_;
     Pipeline::BindingTypeMap binding_types_;
     bool is_frame_set_;
@@ -149,7 +162,7 @@ private:
     std::vector<std::shared_ptr<Buffer>> buffers_;
 };
 
-class DescriptorPool {
+class DescriptorPool : public std::enable_shared_from_this<DescriptorPool> {
 public:
     static std::expected<std::shared_ptr<DescriptorPool>, Error> create(
         Context& context,
@@ -186,7 +199,10 @@ public:
         VkDescriptorPoolCreateInfo poolInfo{
             .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,
             .pNext = nullptr,
-            .flags = 0,
+            // Sets return to the pool when their Python object is collected.
+            // Without this flag a pool was strictly one-way: allocate enough
+            // times and it fills up forever.
+            .flags = VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT,
             .maxSets = maxSets,
             .poolSizeCount = static_cast<uint32_t>(poolSizes.size()),
             .pPoolSizes = poolSizes.data()
@@ -201,11 +217,17 @@ public:
         return std::shared_ptr<DescriptorPool>(new DescriptorPool(context.shared_from_this(), pool));
     }
 
+    // Deferred, so it lands in the queue after every set's free (sets hold the
+    // pool, so their destructors necessarily run first).
     ~DescriptorPool() {
         if (pool_ != VK_NULL_HANDLE && context_) {
-            vkDestroyDescriptorPool(context_->device(), pool_, nullptr);
+            context_->defer_destroy([device = context_->device(), pool = pool_] {
+                vkDestroyDescriptorPool(device, pool, nullptr);
+            });
         }
     }
+
+    VkDescriptorPool get() const { return pool_; }
 
     DescriptorPool(const DescriptorPool&) = delete;
     DescriptorPool& operator=(const DescriptorPool&) = delete;
@@ -235,7 +257,7 @@ public:
         }
 
         return std::make_shared<DescriptorSet>(
-            context_, std::vector<VkDescriptorSet>{set},
+            context_, shared_from_this(), std::vector<VkDescriptorSet>{set},
             pipeline->binding_types(setIndex), false);
     }
 
@@ -266,7 +288,7 @@ public:
         }
 
         return std::make_shared<DescriptorSet>(
-            context_, std::move(sets),
+            context_, shared_from_this(), std::move(sets),
             pipeline->binding_types(setIndex), true);
     }
 
@@ -281,3 +303,13 @@ private:
     std::shared_ptr<Context> context_;
     VkDescriptorPool pool_ = VK_NULL_HANDLE;
 };
+
+// Out of line: needs DescriptorPool to be complete for pool_->get().
+inline DescriptorSet::~DescriptorSet() {
+    if (context_ && pool_ && !sets_.empty()) {
+        context_->defer_destroy(
+            [device = context_->device(), pool = pool_->get(), sets = std::move(sets_)] {
+                vkFreeDescriptorSets(device, pool, static_cast<uint32_t>(sets.size()), sets.data());
+            });
+    }
+}
