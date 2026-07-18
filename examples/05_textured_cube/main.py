@@ -117,8 +117,8 @@ ibuf = ctx.create_buffer(indices, bz.BufferType.INDEX, bz.MemoryUsage.STATIC, bz
 ubuf = ctx.create_buffer([0.0]*16, bz.BufferType.UNIFORM, bz.MemoryUsage.DYNAMIC, bz.DataType.FLOAT)
 
 # Load textures and create descriptors
-tex1 = ctx.load_texture("../assets/wall.png")
-tex2 = ctx.load_texture("../assets/container.png")
+tex1 = ctx.load_image("../assets/wall.png")
+tex2 = ctx.load_image("../assets/container.png")
 
 pool = ctx.create_descriptor_pool(max_sets=4, samplers=2, uniform_buffers=2)
 
@@ -126,10 +126,10 @@ frame_set = pool.allocate_frame_set(pipeline, set=0)
 frame_set.set_buffer(0, ubuf)
 
 bricks_set = pool.allocate_set(pipeline, set=1)
-bricks_set.set_texture(0, tex1)
+bricks_set.set_image(0, tex1)
 
 crate_set = pool.allocate_set(pipeline, set=1)
-crate_set.set_texture(0, tex2)
+crate_set.set_image(0, tex2)
 
 # Record commands
 cmd = ctx.create_command_buffer()

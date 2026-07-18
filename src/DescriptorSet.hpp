@@ -7,7 +7,8 @@
 #include <vector>
 #include "Context.hpp"
 #include "Pipeline.hpp"
-#include "Texture.hpp"
+#include "Image.hpp"
+#include "Sampler.hpp"
 #include "Buffer.hpp"
 
 class DescriptorSet {
@@ -18,10 +19,13 @@ public:
         : context_(context), sets_(std::move(sets)),
           binding_types_(std::move(bindingTypes)), is_frame_set_(isFrameSet) {}
 
-    // Write a texture to this descriptor set (all copies)
-    std::expected<void, Error> set_texture(uint32_t binding, std::shared_ptr<Texture> texture) {
+    // Write an image + sampler to this descriptor set (all copies).
+    // sampler == nullptr means "the default": linear, repeat, anisotropic —
+    // resolved through the Context's cache, so it costs nothing.
+    std::expected<void, Error> set_image(uint32_t binding, std::shared_ptr<Image> image,
+                                         std::shared_ptr<Sampler> sampler = nullptr) {
         if (!context_) return std::unexpected(err_init("Context destroyed"));
-        if (!texture) return std::unexpected(err_resource("set_texture: texture is null"));
+        if (!image) return std::unexpected(err_resource("set_image: image is null"));
 
         // A typo in the binding index used to surface only as a validation error
         // at submit time (or not at all with the layers off). Diagnose it here.
@@ -36,9 +40,17 @@ public:
                 binding)));
         }
 
+        if (!sampler) {
+            auto def = context_->get_sampler({});
+            if (!def) {
+                return std::unexpected(def.error());
+            }
+            sampler = std::move(*def);
+        }
+
         VkDescriptorImageInfo imageInfo{
-            .sampler = texture->sampler(),
-            .imageView = texture->image_view(),
+            .sampler = sampler->get(),
+            .imageView = image->view(),
             .imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL
         };
 
@@ -57,7 +69,8 @@ public:
             };
             vkUpdateDescriptorSets(context_->device(), 1, &write, 0, nullptr);
         }
-        textures_.push_back(texture);
+        images_.push_back(std::move(image));
+        samplers_.push_back(std::move(sampler));
         return {};
     }
 
@@ -85,7 +98,7 @@ public:
         const VkDescriptorType descType = it->second;
         if (descType == VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER) {
             return std::unexpected(err_resource(std::format(
-                "Binding {} is a sampler binding; use set_texture() for texture bindings",
+                "Binding {} is a sampler binding; use set_image() for image bindings",
                 binding)));
         }
 
@@ -131,7 +144,8 @@ private:
     Pipeline::BindingTypeMap binding_types_;
     bool is_frame_set_;
     // Hold shared_ptrs to prevent resources from being freed
-    std::vector<std::shared_ptr<Texture>> textures_;
+    std::vector<std::shared_ptr<Image>> images_;
+    std::vector<std::shared_ptr<Sampler>> samplers_;
     std::vector<std::shared_ptr<Buffer>> buffers_;
 };
 

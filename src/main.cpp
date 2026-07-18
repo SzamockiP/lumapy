@@ -23,7 +23,9 @@
 #include "ShaderCompiler.hpp"
 #include "Pipeline.hpp"
 #include "CommandBuffer.hpp"
-#include "Texture.hpp"
+#include "Format.hpp"
+#include "Image.hpp"
+#include "Sampler.hpp"
 #include "DescriptorSet.hpp"
 
 namespace py = pybind11;
@@ -420,6 +422,28 @@ PYBIND11_MODULE(_core, m) {
         .value("FLOAT4", VertexFormat::FLOAT4)
         .export_values();
 
+    // Pixel formats — the name VertexFormat freed in 0.4.
+    py::enum_<Format>(m, "Format")
+        .value("RGBA8", Format::RGBA8)
+        .value("RGBA8_SRGB", Format::RGBA8_SRGB)
+        .value("BGRA8", Format::BGRA8)
+        .value("R8", Format::R8)
+        .value("RG8", Format::RG8)
+        .value("R16F", Format::R16F)
+        .value("RGBA16F", Format::RGBA16F)
+        .value("R32F", Format::R32F)
+        .value("RGBA32F", Format::RGBA32F)
+        .value("D32F", Format::D32F);
+
+    py::enum_<Filter>(m, "Filter")
+        .value("LINEAR", Filter::LINEAR)
+        .value("NEAREST", Filter::NEAREST);
+
+    py::enum_<AddressMode>(m, "AddressMode")
+        .value("REPEAT", AddressMode::REPEAT)
+        .value("CLAMP", AddressMode::CLAMP)
+        .value("MIRROR", AddressMode::MIRROR);
+
     py::enum_<CullMode>(m, "CullMode")
         .value("NONE", CullMode::NONE)
         .value("BACK", CullMode::BACK)
@@ -460,9 +484,38 @@ PYBIND11_MODULE(_core, m) {
     
     py::class_<ShaderModule, std::shared_ptr<ShaderModule>>(m, "ShaderModule");
 
-    py::class_<Texture, std::shared_ptr<Texture>>(m, "Texture")
-        .def_property_readonly("width", &Texture::width)
-        .def_property_readonly("height", &Texture::height);
+    // Image + Sampler replace the old Texture, which fused VkImage, view and a
+    // per-texture sampler into one object. Samplers are cached on the Context;
+    // an Image is just the pixels.
+    py::class_<Image, std::shared_ptr<Image>>(m, "Image")
+        .def_property_readonly("width", &Image::width)
+        .def_property_readonly("height", &Image::height)
+        .def_property_readonly("format", &Image::format)
+        .def_property_readonly("mip_levels", &Image::mip_levels)
+        .def_property_readonly("ready", &Image::ready)
+        .def("wait", [](Image& self) {
+            unwrap(self.wait(), nullptr);
+        })
+        .def("read", [](Image& self) -> py::array {
+            auto bytes = unwrap(self.read(), nullptr);
+            const FormatInfo info = format_info(self.format());
+
+            std::vector<py::ssize_t> shape;
+            if (info.channels == 1) {
+                shape = { static_cast<py::ssize_t>(self.height()),
+                          static_cast<py::ssize_t>(self.width()) };
+            } else {
+                shape = { static_cast<py::ssize_t>(self.height()),
+                          static_cast<py::ssize_t>(self.width()),
+                          static_cast<py::ssize_t>(info.channels) };
+            }
+
+            py::array out(py::dtype(info.numpy_dtype), shape);
+            std::memcpy(out.mutable_data(), bytes.data(), bytes.size());
+            return out;
+        });
+
+    py::class_<Sampler, std::shared_ptr<Sampler>>(m, "Sampler");
 
     py::class_<Pipeline, std::shared_ptr<Pipeline>>(m, "Pipeline");
 
@@ -508,9 +561,10 @@ PYBIND11_MODULE(_core, m) {
         }, py::arg("target"));
 
     py::class_<DescriptorSet, std::shared_ptr<DescriptorSet>>(m, "DescriptorSet")
-        .def("set_texture", [](DescriptorSet& self, uint32_t binding, std::shared_ptr<Texture> texture) {
-            unwrap(self.set_texture(binding, std::move(texture)), nullptr);
-        }, py::arg("binding"), py::arg("texture"))
+        .def("set_image", [](DescriptorSet& self, uint32_t binding, std::shared_ptr<Image> image,
+                             std::shared_ptr<Sampler> sampler) {
+            unwrap(self.set_image(binding, std::move(image), std::move(sampler)), nullptr);
+        }, py::arg("binding"), py::arg("image"), py::arg("sampler") = py::none())
         .def("set_buffer", [](DescriptorSet& self, uint32_t binding, std::shared_ptr<Buffer> buffer) {
             unwrap(self.set_buffer(binding, std::move(buffer)), nullptr);
         }, py::arg("binding"), py::arg("buffer"));
@@ -666,9 +720,67 @@ PYBIND11_MODULE(_core, m) {
         .def("compile_shader", [](Context& self, const std::string& path, ShaderStage stage) -> py::object {
             return py::cast(unwrap(ShaderCompiler::compile(self, path, stage), self.logger().get()));
         }, py::arg("path"), py::arg("stage"))
-        .def("load_texture", [](Context& self, const std::string& path) -> py::object {
-            return py::cast(unwrap(Texture::create(self, path), self.logger().get()));
+        .def("load_image", [](Context& self, const std::string& path) -> py::object {
+            // sRGB with a full mip chain: files are pictures. Arrays go through
+            // create_image and stay UNORM: arrays are data.
+            return py::cast(unwrap(Image::load_from_file(self, path), self.logger().get()));
         }, py::arg("path"))
+        // Registered before the buffer overload so two ints never reach the
+        // buffer protocol.
+        .def("create_image", [](Context& self, uint32_t width, uint32_t height, Format format) -> py::object {
+            return py::cast(unwrap(Image::create_empty(self, width, height, format), self.logger().get()));
+        }, py::arg("width"), py::arg("height"), py::arg("format") = Format::RGBA8)
+        .def("create_image", [](Context& self, py::buffer b) -> py::object {
+            py::buffer_info info = b.request();
+            contiguous_nbytes(info, "create_image");
+
+            if (info.ndim != 2 && info.ndim != 3) {
+                raise_error(err_resource(std::format(
+                    "create_image expects a (h, w) or (h, w, channels) array, got {} dimensions",
+                    info.ndim)));
+            }
+            const auto height = static_cast<uint32_t>(info.shape[0]);
+            const auto width = static_cast<uint32_t>(info.shape[1]);
+            const py::ssize_t channels = info.ndim == 3 ? info.shape[2] : 1;
+
+            // shape + dtype -> Format. UNORM, never sRGB: arrays are data,
+            // files are pictures — the sRGB default belongs to load_image.
+            std::optional<Format> format;
+            if (info.format == "B") {          // uint8
+                if (channels == 1) format = Format::R8;
+                else if (channels == 2) format = Format::RG8;
+                else if (channels == 4) format = Format::RGBA8;
+            } else if (info.format == "e") {   // float16
+                if (channels == 1) format = Format::R16F;
+                else if (channels == 4) format = Format::RGBA16F;
+            } else if (info.format == "f") {   // float32
+                if (channels == 1) format = Format::R32F;
+                else if (channels == 4) format = Format::RGBA32F;
+            }
+
+            if (!format) {
+                if (channels == 3) {
+                    raise_error(err_resource(
+                        "create_image: 3-channel images have no portable GPU format; "
+                        "pad to 4 channels first, e.g. "
+                        "np.concatenate([arr, np.full_like(arr[..., :1], 255)], axis=-1)"));
+                }
+                raise_error(err_resource(std::format(
+                    "create_image: unsupported dtype/shape (dtype '{}', {} channel(s)). "
+                    "Supported: uint8 x 1/2/4 channels, float16 x 1/4, float32 x 1/4",
+                    info.format, channels)));
+            }
+
+            return py::cast(unwrap(
+                Image::create_from_pixels(self, info.ptr, width, height, *format),
+                self.logger().get()));
+        }, py::arg("array"))
+        .def("create_sampler", [](Context& self, Filter filter, AddressMode address_mode, bool anisotropy) -> py::object {
+            // Cached: identical descriptions return the identical object.
+            return py::cast(unwrap(self.get_sampler(SamplerDesc{ filter, address_mode, anisotropy }),
+                                   self.logger().get()));
+        }, py::arg("filter") = Filter::LINEAR, py::arg("address_mode") = AddressMode::REPEAT,
+           py::arg("anisotropy") = true)
         .def("create_descriptor_pool", [](Context& self, uint32_t maxSets, uint32_t samplers, uint32_t uniformBuffers, uint32_t storageBuffers) -> py::object {
             return py::cast(unwrap(
                 DescriptorPool::create(self, maxSets, samplers, uniformBuffers, storageBuffers),

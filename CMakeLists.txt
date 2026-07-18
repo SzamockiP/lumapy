@@ -81,16 +81,18 @@ add_library(_core MODULE
     src/DescriptorSet.hpp
     src/Error.hpp
     src/Features.hpp
+    src/Format.hpp
+    src/Image.hpp
     src/ImmediateSubmit.hpp
     src/Logger.hpp
     src/MpscQueue.hpp
     src/Pipeline.hpp
     src/Renderer.hpp
     src/RenderTarget.hpp
+    src/Sampler.hpp
     src/ScopeGuard.hpp
     src/ShaderCompiler.hpp
     src/SurfaceProvider.hpp
-    src/Texture.hpp
     src/window.hpp
 )
 

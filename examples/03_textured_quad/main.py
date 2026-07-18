@@ -15,7 +15,7 @@ vert_spv = ctx.compile_shader("quad_tex.vert", bz.ShaderStage.VERTEX)
 frag_spv = ctx.compile_shader("quad_tex.frag", bz.ShaderStage.FRAGMENT)
 
 # Load texture
-texture = ctx.load_texture("../assets/wall.png")
+texture = ctx.load_image("../assets/wall.png")
 
 # Build pipeline: Position (FLOAT2) + UV (FLOAT2)
 pipeline = (ctx.pipeline_builder()
@@ -40,7 +40,7 @@ ibuf = ctx.create_buffer(indices, bz.BufferType.INDEX, bz.MemoryUsage.STATIC, bz
 # Descriptors
 pool = ctx.create_descriptor_pool(max_sets=1, samplers=1)
 desc_set = pool.allocate_set(pipeline, set=0)
-desc_set.set_texture(0, texture)
+desc_set.set_image(0, texture)
 
 # Record commands
 cmd = ctx.create_command_buffer()

@@ -12,12 +12,14 @@
 #include <mutex>
 #include <set>
 #include <string>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 
 #include "Error.hpp"
 #include "Features.hpp"
 #include "Logger.hpp"
+#include "Sampler.hpp"
 
 // How hard to try to turn on the validation layers.
 //
@@ -142,6 +144,12 @@ public:
 		}
 		deletion_queue_.clear();
 
+		for (auto& [key, sampler] : sampler_cache_)
+		{
+			vkDestroySampler(vkb_device_.device, sampler->get(), nullptr);
+		}
+		sampler_cache_.clear();
+
 		if (command_pool_)
 		{
 			vkDestroyCommandPool(vkb_device_.device, command_pool_, nullptr);
@@ -258,6 +266,65 @@ public:
 			deletion_queue_.front().second();
 			deletion_queue_.pop_front();
 		}
+	}
+
+	// ── Sampler cache ─────────────────────────────────────────────────────────
+	//
+	// Identical descriptions share one VkSampler; Texture used to create a
+	// fresh sampler per texture. Cached handles live until ~Context — the
+	// descriptor space is a handful of combinations, never worth evicting.
+	std::expected<std::shared_ptr<Sampler>, Error> get_sampler(const SamplerDesc& desc)
+	{
+		const std::uint32_t key = sampler_cache_key(desc);
+		if (auto it = sampler_cache_.find(key); it != sampler_cache_.end())
+		{
+			return it->second;
+		}
+
+		const bool anisotropy = desc.anisotropy && supports(Feature::ANISOTROPIC_FILTERING);
+		const VkFilter filter = desc.filter == Filter::NEAREST ? VK_FILTER_NEAREST : VK_FILTER_LINEAR;
+		VkSamplerAddressMode address = VK_SAMPLER_ADDRESS_MODE_REPEAT;
+		switch (desc.address_mode)
+		{
+			case AddressMode::REPEAT: address = VK_SAMPLER_ADDRESS_MODE_REPEAT; break;
+			case AddressMode::CLAMP: address = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE; break;
+			case AddressMode::MIRROR: address = VK_SAMPLER_ADDRESS_MODE_MIRRORED_REPEAT; break;
+		}
+
+		VkSamplerCreateInfo info{
+			.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO,
+			.pNext = nullptr,
+			.flags = 0,
+			.magFilter = filter,
+			.minFilter = filter,
+			.mipmapMode = desc.filter == Filter::NEAREST
+				? VK_SAMPLER_MIPMAP_MODE_NEAREST : VK_SAMPLER_MIPMAP_MODE_LINEAR,
+			.addressModeU = address,
+			.addressModeV = address,
+			.addressModeW = address,
+			.mipLodBias = 0.0f,
+			.anisotropyEnable = anisotropy ? VK_TRUE : VK_FALSE,
+			.maxAnisotropy = anisotropy ? 16.0f : 1.0f,
+			.compareEnable = VK_FALSE,
+			.compareOp = VK_COMPARE_OP_ALWAYS,
+			.minLod = 0.0f,
+			// The whole mip chain. The old per-texture sampler had maxLod = 0,
+			// which would have clamped every mip away the moment mips existed.
+			.maxLod = VK_LOD_CLAMP_NONE,
+			.borderColor = VK_BORDER_COLOR_INT_OPAQUE_BLACK,
+			.unnormalizedCoordinates = VK_FALSE
+		};
+
+		VkSampler handle = VK_NULL_HANDLE;
+		if (auto e = check(vkCreateSampler(vkb_device_.device, &info, nullptr, &handle),
+		                   "create sampler", ErrorCode::Resource))
+		{
+			return std::unexpected(*e);
+		}
+
+		auto sampler = std::make_shared<Sampler>(handle, desc);
+		sampler_cache_.emplace(key, sampler);
+		return sampler;
 	}
 
 	// Guards against two SwapchainRenderers fighting over the frame ring.
@@ -693,4 +760,5 @@ private:
 	std::uint64_t frame_serial_ = 0;
 	std::uint64_t completed_serial_ = 0;
 	std::deque<std::pair<std::uint64_t, std::function<void()>>> deletion_queue_;
+	std::unordered_map<std::uint32_t, std::shared_ptr<Sampler>> sampler_cache_;
 };

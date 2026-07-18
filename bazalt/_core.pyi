@@ -129,6 +129,32 @@ class VertexFormat(IntEnum):
     FLOAT3 = 1
     FLOAT4 = 2
 
+class Format(IntEnum):
+    """Pixel formats.
+
+    RGBA8 is data (UNORM, what arrays and render targets default to);
+    RGBA8_SRGB is pictures (what load_image decodes into).
+    """
+    RGBA8 = 0
+    RGBA8_SRGB = 1
+    BGRA8 = 2
+    R8 = 3
+    RG8 = 4
+    R16F = 5
+    RGBA16F = 6
+    R32F = 7
+    RGBA32F = 8
+    D32F = 9
+
+class Filter(IntEnum):
+    LINEAR = 0
+    NEAREST = 1
+
+class AddressMode(IntEnum):
+    REPEAT = 0
+    CLAMP = 1
+    MIRROR = 2
+
 class CullMode(IntEnum):
     NONE = 0
     BACK = 1
@@ -165,16 +191,51 @@ class Buffer:
 
 class ShaderModule: ...
 
-class Texture:
+class Image:
+    """A GPU image: pixels + format. The sampler it used to be fused with is a
+    separate (cached) object — see Context.create_sampler."""
+
     @property
     def width(self) -> int: ...
     @property
     def height(self) -> int: ...
+    @property
+    def format(self) -> Format: ...
+    @property
+    def mip_levels(self) -> int: ...
+    @property
+    def ready(self) -> bool:
+        """Non-blocking: has the upload finished? (Always True while uploads
+        are synchronous.)"""
+        ...
+
+    def wait(self) -> None:
+        """Block until this image's upload has finished."""
+        ...
+
+    def read(self) -> Any:
+        """Copy mip 0 back to host memory as a numpy array.
+
+        Shape is (height, width, channels) — or (height, width) for
+        single-channel formats — and the dtype follows the format (uint8,
+        float16 or float32). Blocking; a debugging and test path.
+
+        Raises ResourceError if the image has no contents yet.
+        """
+        ...
+
+class Sampler:
+    """How to read texels. Cached on the Context: identical descriptions are
+    the identical object."""
+    ...
 
 class Pipeline: ...
 
 class DescriptorSet:
-    def set_texture(self, binding: int, texture: Texture) -> None: ...
+    def set_image(self, binding: int, image: Image,
+                  sampler: Optional[Sampler] = None) -> None:
+        """Bind an image (+ sampler; None means linear/repeat/anisotropic)."""
+        ...
     def set_buffer(self, binding: int, buffer: Buffer) -> None: ...
 
 class DescriptorPool:
@@ -329,7 +390,21 @@ class Context:
 
     def pipeline_builder(self) -> PipelineBuilder: ...
     def compile_shader(self, path: str, stage: ShaderStage) -> ShaderModule: ...
-    def load_texture(self, path: str) -> Texture: ...
+
+    def load_image(self, path: str) -> Image:
+        """Decode an image file into an sRGB GPU image with a full mip chain."""
+        ...
+    def create_image(self, width: int, height: int,
+                     format: Format = Format.RGBA8) -> Image: ...
+    def create_image(self, array: Any) -> Image:
+        """From a numpy array; shape + dtype pick the format (UNORM — arrays
+        are data, files are pictures). (h, w, 3) has no portable GPU format
+        and raises ResourceError with a padding hint.
+        """
+        ...
+    def create_sampler(self, filter: Filter = Filter.LINEAR,
+                       address_mode: AddressMode = AddressMode.REPEAT,
+                       anisotropy: bool = True) -> Sampler: ...
     def create_descriptor_pool(self, max_sets: int, samplers: int = 0,
                                uniform_buffers: int = 0,
                                storage_buffers: int = 0) -> DescriptorPool: ...

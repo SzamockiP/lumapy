@@ -9,7 +9,6 @@
 #include "RenderTarget.hpp"
 #include "Pipeline.hpp"
 #include "Buffer.hpp"
-#include "Texture.hpp"
 #include "DescriptorSet.hpp"
 
 // Records commands once and replays them every submit.

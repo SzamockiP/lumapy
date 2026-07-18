@@ -125,7 +125,7 @@ class DemoApp:
         self.loaded_textures = {}
         
         white_png_path = os.path.join(self.assets_dir, "white.png")
-        self.default_texture = self.ctx.load_texture(white_png_path)
+        self.default_texture = self.ctx.load_image(white_png_path)
         
         all_vertices, all_normals, all_uvs, all_colors, all_faces = [], [], [], [], []
         self.draw_calls = []
@@ -162,7 +162,7 @@ class DemoApp:
                         tex_file = tex_file if os.path.isabs(tex_file) else os.path.normpath(os.path.join(obj_dir, tex_file))
                         if os.path.exists(tex_file):
                             if tex_file not in self.loaded_textures:
-                                self.loaded_textures[tex_file] = self.ctx.load_texture(tex_file)
+                                self.loaded_textures[tex_file] = self.ctx.load_image(tex_file)
                             tex = self.loaded_textures[tex_file]
             
             colors = np.tile(mat_color, (len(vertices), 1)).astype(np.float32)
@@ -207,11 +207,11 @@ class DemoApp:
         self.texture_sets = {}
         for path, tex in self.loaded_textures.items():
             tex_set = self.pool.allocate_set(self.pipeline, set=1)
-            tex_set.set_texture(0, tex)
+            tex_set.set_image(0, tex)
             self.texture_sets[tex] = tex_set
             
         default_tex_set = self.pool.allocate_set(self.pipeline, set=1)
-        default_tex_set.set_texture(0, self.default_texture)
+        default_tex_set.set_image(0, self.default_texture)
         self.texture_sets[self.default_texture] = default_tex_set
 
     def record_commands(self):

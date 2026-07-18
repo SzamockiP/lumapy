@@ -28,10 +28,16 @@ def test_every_public_name_is_in_all():
 
 
 def test_removed_names_are_gone_from_the_stub():
-    """Names dropped in 0.4 must not linger in the stub."""
+    """Names dropped in 0.4/0.5 must not linger in the stub.
+
+    (0.4 removed `Format` as a vertex-attribute enum; 0.5 reintroduced the
+    name for pixel formats, which is why it is asserted PRESENT below.)
+    """
     text = stub_text()
-    assert "class Format(" not in text, "Format was renamed to VertexFormat"
     assert "def on_error" not in text, "on_error was replaced by on_message"
+    assert "class Texture" not in text, "Texture was split into Image + Sampler"
+    assert "load_texture" not in text, "load_texture became load_image"
+    assert "set_texture" not in text, "set_texture became set_image"
 
 
 def test_renamed_and_new_api_is_declared():
@@ -39,7 +45,11 @@ def test_renamed_and_new_api_is_declared():
     for expected in ("class VertexFormat(", "def on_message", "class LogMessage",
                      "class Severity(", "class Source(", "class Feature(",
                      "class RenderTarget(", "def read_pixels", "class BazaltError",
-                     "def flush"):
+                     "def flush",
+                     # 0.5
+                     "class Format(", "class Image", "class Sampler",
+                     "class Frame", "def load_image", "def create_image",
+                     "def create_sampler", "def set_image"):
         assert expected in text, f"{expected!r} missing from _core.pyi"
 
 
