@@ -34,7 +34,9 @@ vertices = [
 ]
 vbuf = ctx.create_buffer(vertices, bz.BufferType.VERTEX, bz.MemoryUsage.STATIC, bz.DataType.FLOAT)
 
-indices = [0, 1, 2, 2, 3, 0]
+# Counter-clockwise on screen (Vulkan's y points down), so the quad is
+# front-facing under the pipeline's default back-face culling.
+indices = [0, 3, 2, 2, 1, 0]
 ibuf = ctx.create_buffer(indices, bz.BufferType.INDEX, bz.MemoryUsage.STATIC, bz.DataType.UINT32)
 
 # Descriptors
