@@ -19,6 +19,7 @@ from bazalt._core import (  # noqa: F401 — explicit re-exports for IDE visibil
     DescriptorPool,
     DescriptorSet,
     CommandBuffer,
+    RenderingScope,
     MouseState,
     BufferType,
     DataType,
@@ -64,6 +65,7 @@ __all__ = [
     "DescriptorPool",
     "DescriptorSet",
     "CommandBuffer",
+    "RenderingScope",
     # Data types
     "MouseState",
     "BufferType",

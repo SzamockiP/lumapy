@@ -1,4 +1,4 @@
-#pragma once
+﻿#pragma once
 #include <volk.h>
 #include <memory>
 #include <vector>
@@ -60,15 +60,16 @@ public:
     CommandBuffer(const CommandBuffer&) = delete;
     CommandBuffer& operator=(const CommandBuffer&) = delete;
 
-    void begin() {
+    CommandBuffer& begin() {
         commands_.clear();
+        return *this;
     }
 
     // The target is explicit. It used to default to "the swapchain" implicitly,
     // which made presentation a special case dressed up as the default and left
     // no way to name anything else. Naming what you draw into costs one token
     // and buys one rule that holds everywhere.
-    void begin_rendering(std::shared_ptr<RenderTarget> target, const std::vector<float>& clear_color) {
+    CommandBuffer& begin_rendering(std::shared_ptr<RenderTarget> target, const std::vector<float>& clear_color) {
         std::array<float, 4> cc = {0.0f, 0.0f, 0.0f, 1.0f};
         if (clear_color.size() >= 4) {
             cc[0] = clear_color[0]; cc[1] = clear_color[1]; cc[2] = clear_color[2]; cc[3] = clear_color[3];
@@ -184,7 +185,7 @@ public:
             vkCmdBeginRendering(cmd, &renderingInfo);
 
             // Emitted automatically: set_viewport()/set_scissor() took no arguments
-            // and silently read the swapchain, which is magic — just less legible
+            // and silently read the swapchain, which is magic â€” just less legible
             // than doing it here. set_viewport(x, y, w, h) remains for the cases
             // that genuinely want something other than the whole target.
             VkViewport viewport{
@@ -200,15 +201,16 @@ public:
             VkRect2D scissor{ .offset = {0, 0}, .extent = rt->extent() };
             vkCmdSetScissor(cmd, 0, 1, &scissor);
         });
+        return *this;
     }
 
-    void end_rendering(std::shared_ptr<RenderTarget> target) {
+    CommandBuffer& end_rendering(std::shared_ptr<RenderTarget> target) {
         commands_.push_back([target](VkCommandBuffer cmd, const FrameContext& frame) {
             vkCmdEndRendering(cmd);
 
             // Every colour attachment retires to the target's final layout.
             // (Was VK_IMAGE_LAYOUT_PRESENT_SRC_KHR, unconditionally, on colour 0
-            // only — that one constant is why nothing but a swapchain could ever
+            // only â€” that one constant is why nothing but a swapchain could ever
             // be drawn into.)
             for (uint32_t i = 0; i < target->color_count(); ++i) {
                 VkImageMemoryBarrier barrier{
@@ -239,7 +241,7 @@ public:
 
             // Depth retires to its own final layout when it will be consumed
             // (offscreen: SHADER_READ_ONLY, which is what makes `target.depth`
-            // sampleable). The swapchain's depth stays put — no barrier.
+            // sampleable). The swapchain's depth stays put â€” no barrier.
             if (target->depth_image() != VK_NULL_HANDLE &&
                 target->depth_final_layout() != VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL) {
                 VkImageMemoryBarrier depthBarrier{
@@ -268,16 +270,17 @@ public:
                 );
             }
 
-            // Runs at execute() time, inside a real submit — so the target learns
+            // Runs at execute() time, inside a real submit â€” so the target learns
             // its images have left UNDEFINED exactly when that becomes true, and a
             // recorded-but-never-submitted command buffer marks nothing.
             target->on_rendering_recorded();
         });
+        return *this;
     }
 
     // Explicit override for split-screen and similar. The no-argument version is
     // gone: begin_rendering already covers the whole-target case.
-    void set_viewport(float x, float y, float width, float height) {
+    CommandBuffer& set_viewport(float x, float y, float width, float height) {
         commands_.push_back([x, y, width, height](VkCommandBuffer cmd, const FrameContext&) {
             VkViewport viewport{
                 .x = x, .y = y, .width = width, .height = height,
@@ -285,66 +288,75 @@ public:
             };
             vkCmdSetViewport(cmd, 0, 1, &viewport);
         });
+        return *this;
     }
 
-    void set_scissor(std::int32_t x, std::int32_t y, std::uint32_t width, std::uint32_t height) {
+    CommandBuffer& set_scissor(std::int32_t x, std::int32_t y, std::uint32_t width, std::uint32_t height) {
         commands_.push_back([x, y, width, height](VkCommandBuffer cmd, const FrameContext&) {
             VkRect2D scissor{ .offset = {x, y}, .extent = {width, height} };
             vkCmdSetScissor(cmd, 0, 1, &scissor);
         });
+        return *this;
     }
 
-    void bind_pipeline(std::shared_ptr<Pipeline> pipeline) {
+    CommandBuffer& bind_pipeline(std::shared_ptr<Pipeline> pipeline) {
         commands_.push_back([pipeline](VkCommandBuffer cmd, const FrameContext&) {
             vkCmdBindPipeline(cmd, pipeline->bind_point(), pipeline->get());
         });
+        return *this;
     }
 
-    void bind_vertex_buffer(std::shared_ptr<Buffer> buffer) {
+    CommandBuffer& bind_vertex_buffer(std::shared_ptr<Buffer> buffer) {
         commands_.push_back([buffer](VkCommandBuffer cmd, const FrameContext&) {
             VkBuffer vertexBuffers[] = {buffer->get()};
             VkDeviceSize offsets[] = {0};
             vkCmdBindVertexBuffers(cmd, 0, 1, vertexBuffers, offsets);
         });
+        return *this;
     }
 
-    void bind_index_buffer(std::shared_ptr<Buffer> buffer) {
+    CommandBuffer& bind_index_buffer(std::shared_ptr<Buffer> buffer) {
         commands_.push_back([buffer](VkCommandBuffer cmd, const FrameContext&) {
             // Derived from the buffer rather than hardcoded to UINT32: create_buffer
             // accepts UINT16 indices, which used to be read back at half count.
             vkCmdBindIndexBuffer(cmd, buffer->get(), 0, buffer->index_type());
         });
+        return *this;
     }
 
-    void draw(uint32_t vertexCount) {
+    CommandBuffer& draw(uint32_t vertexCount) {
         commands_.push_back([vertexCount](VkCommandBuffer cmd, const FrameContext&) {
             vkCmdDraw(cmd, vertexCount, 1, 0, 0);
         });
+        return *this;
     }
 
-    void draw_indexed(uint32_t indexCount, uint32_t firstIndex = 0, int32_t vertexOffset = 0) {
+    CommandBuffer& draw_indexed(uint32_t indexCount, uint32_t firstIndex = 0, int32_t vertexOffset = 0) {
         commands_.push_back([indexCount, firstIndex, vertexOffset](VkCommandBuffer cmd, const FrameContext&) {
             vkCmdDrawIndexed(cmd, indexCount, 1, firstIndex, vertexOffset, 0);
         });
+        return *this;
     }
 
-    void draw_indexed_instanced(uint32_t indexCount, uint32_t instanceCount, uint32_t firstIndex = 0, int32_t vertexOffset = 0) {
+    CommandBuffer& draw_indexed_instanced(uint32_t indexCount, uint32_t instanceCount, uint32_t firstIndex = 0, int32_t vertexOffset = 0) {
         commands_.push_back([indexCount, instanceCount, firstIndex, vertexOffset](VkCommandBuffer cmd, const FrameContext&) {
             vkCmdDrawIndexed(cmd, indexCount, instanceCount, firstIndex, vertexOffset, 0);
         });
+        return *this;
     }
 
     // No stage argument: the Pipeline already knows which stages its push constant
     // range covers, so passing a mismatched one was a validation error for no gain.
-    void push_constants(std::shared_ptr<Pipeline> pipeline, uint32_t offset, uint32_t size, const void* data) {
+    CommandBuffer& push_constants(std::shared_ptr<Pipeline> pipeline, uint32_t offset, uint32_t size, const void* data) {
         std::vector<uint8_t> buffer(static_cast<const uint8_t*>(data), static_cast<const uint8_t*>(data) + size);
         commands_.push_back([pipeline, offset, size, buffer](VkCommandBuffer cmd, const FrameContext&) {
             vkCmdPushConstants(cmd, pipeline->layout(), pipeline->push_constant_stages(),
                                offset, size, buffer.data());
         });
+        return *this;
     }
 
-    void bind_descriptor_set(std::shared_ptr<DescriptorSet> descSet,
+    CommandBuffer& bind_descriptor_set(std::shared_ptr<DescriptorSet> descSet,
                            std::shared_ptr<Pipeline> pipeline,
                            uint32_t setIndex) {
         commands_.push_back([descSet, pipeline, setIndex](VkCommandBuffer cmd, const FrameContext& frame) {
@@ -352,6 +364,7 @@ public:
             vkCmdBindDescriptorSets(cmd, pipeline->bind_point(),
                 pipeline->layout(), setIndex, 1, &set, 0, nullptr);
         });
+        return *this;
     }
 
     VkCommandBuffer get(std::uint32_t frame_index) const {

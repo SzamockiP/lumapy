@@ -311,6 +311,16 @@ std::expected<void, Error> Frame::submit(std::shared_ptr<CommandBuffer> cmd) {
     return {};
 }
 
+// The state behind `with cmd.rendering(target, ...):` — carries what
+// __enter__/__exit__ need to record the begin/end pair. Deliberately a plain
+// struct bound only for its dunder methods; begin_rendering/end_rendering
+// stay public, this is sugar, not a replacement.
+struct RenderingScope {
+    std::shared_ptr<CommandBuffer> cmd;
+    std::shared_ptr<RenderTarget> target;
+    std::vector<float> clear_color;
+};
+
 // Readback shaped for numpy: (h, w, channels) — or (h, w) for single-channel
 // formats — with the dtype the format table dictates. Shared by Image.read and
 // RenderTarget.read_pixels.
@@ -584,35 +594,95 @@ PYBIND11_MODULE(_core, m) {
             return py::cast(unwrap(pool.allocate_frame_descriptor_set(pipeline, setIndex), pool.logger().get()));
         }, py::arg("pipeline"), py::arg("set"));
 
+    // Every recording method returns the command buffer itself, so the two
+    // spellings are the same API:
+    //     cmd.begin_rendering(t).bind_pipeline(p).draw(3)
+    // and the statement-per-line style both work. The lambdas return the
+    // shared_ptr self (not the C++ reference) so pybind hands back the SAME
+    // Python object — `cmd.draw(3) is cmd`.
     py::class_<CommandBuffer, std::shared_ptr<CommandBuffer>>(m, "CommandBuffer")
-        .def("begin", &CommandBuffer::begin)
+        .def("begin", [](std::shared_ptr<CommandBuffer> self) {
+            self->begin();
+            return self;
+        })
         // The target is required. begin_rendering() silently meaning "the
         // swapchain" made presentation a special case disguised as the default.
-        .def("begin_rendering", &CommandBuffer::begin_rendering,
-             py::arg("target"), py::arg("clear_color") = std::vector<float>{0.0f, 0.0f, 0.0f, 1.0f})
-        .def("end_rendering", &CommandBuffer::end_rendering, py::arg("target"))
+        .def("begin_rendering", [](std::shared_ptr<CommandBuffer> self, std::shared_ptr<RenderTarget> target,
+                                   const std::vector<float>& clear_color) {
+            self->begin_rendering(std::move(target), clear_color);
+            return self;
+        }, py::arg("target"), py::arg("clear_color") = std::vector<float>{0.0f, 0.0f, 0.0f, 1.0f})
+        .def("end_rendering", [](std::shared_ptr<CommandBuffer> self, std::shared_ptr<RenderTarget> target) {
+            self->end_rendering(std::move(target));
+            return self;
+        }, py::arg("target"))
+        // With-statement sugar over the same pair: __enter__ records
+        // begin_rendering and hands back the cmd, __exit__ records
+        // end_rendering unconditionally — the pair cannot be left open.
+        .def("rendering", [](std::shared_ptr<CommandBuffer> self, std::shared_ptr<RenderTarget> target,
+                             const std::vector<float>& clear_color) {
+            return RenderingScope{ std::move(self), std::move(target), clear_color };
+        }, py::arg("target"), py::arg("clear_color") = std::vector<float>{0.0f, 0.0f, 0.0f, 1.0f})
         // The no-argument versions are gone: begin_rendering emits a full-target
         // viewport and scissor itself. These remain for split-screen and similar.
-        .def("set_viewport", &CommandBuffer::set_viewport,
-             py::arg("x"), py::arg("y"), py::arg("width"), py::arg("height"))
-        .def("set_scissor", &CommandBuffer::set_scissor,
-             py::arg("x"), py::arg("y"), py::arg("width"), py::arg("height"))
-        .def("bind_pipeline", &CommandBuffer::bind_pipeline, py::arg("pipeline"))
-        .def("bind_vertex_buffer", &CommandBuffer::bind_vertex_buffer, py::arg("buffer"))
-        .def("bind_index_buffer", &CommandBuffer::bind_index_buffer, py::arg("buffer"))
-        .def("draw", &CommandBuffer::draw, py::arg("vertex_count"))
-        .def("draw_indexed", &CommandBuffer::draw_indexed,
-             py::arg("index_count"), py::arg("first_index") = 0, py::arg("vertex_offset") = 0)
-        .def("draw_indexed_instanced", &CommandBuffer::draw_indexed_instanced,
-             py::arg("index_count"), py::arg("instance_count"),
-             py::arg("first_index") = 0, py::arg("vertex_offset") = 0)
+        .def("set_viewport", [](std::shared_ptr<CommandBuffer> self, float x, float y, float width, float height) {
+            self->set_viewport(x, y, width, height);
+            return self;
+        }, py::arg("x"), py::arg("y"), py::arg("width"), py::arg("height"))
+        .def("set_scissor", [](std::shared_ptr<CommandBuffer> self, std::int32_t x, std::int32_t y,
+                               std::uint32_t width, std::uint32_t height) {
+            self->set_scissor(x, y, width, height);
+            return self;
+        }, py::arg("x"), py::arg("y"), py::arg("width"), py::arg("height"))
+        .def("bind_pipeline", [](std::shared_ptr<CommandBuffer> self, std::shared_ptr<Pipeline> pipeline) {
+            self->bind_pipeline(std::move(pipeline));
+            return self;
+        }, py::arg("pipeline"))
+        .def("bind_vertex_buffer", [](std::shared_ptr<CommandBuffer> self, std::shared_ptr<Buffer> buffer) {
+            self->bind_vertex_buffer(std::move(buffer));
+            return self;
+        }, py::arg("buffer"))
+        .def("bind_index_buffer", [](std::shared_ptr<CommandBuffer> self, std::shared_ptr<Buffer> buffer) {
+            self->bind_index_buffer(std::move(buffer));
+            return self;
+        }, py::arg("buffer"))
+        .def("draw", [](std::shared_ptr<CommandBuffer> self, uint32_t vertex_count) {
+            self->draw(vertex_count);
+            return self;
+        }, py::arg("vertex_count"))
+        .def("draw_indexed", [](std::shared_ptr<CommandBuffer> self, uint32_t index_count,
+                                uint32_t first_index, int32_t vertex_offset) {
+            self->draw_indexed(index_count, first_index, vertex_offset);
+            return self;
+        }, py::arg("index_count"), py::arg("first_index") = 0, py::arg("vertex_offset") = 0)
+        .def("draw_indexed_instanced", [](std::shared_ptr<CommandBuffer> self, uint32_t index_count,
+                                          uint32_t instance_count, uint32_t first_index, int32_t vertex_offset) {
+            self->draw_indexed_instanced(index_count, instance_count, first_index, vertex_offset);
+            return self;
+        }, py::arg("index_count"), py::arg("instance_count"),
+           py::arg("first_index") = 0, py::arg("vertex_offset") = 0)
         // No stage argument: the Pipeline already records which stages its push
         // constant range covers, so repeating it could only ever be wrong.
-        .def("push_constants", [](CommandBuffer& cmd, std::shared_ptr<Pipeline> pipeline, uint32_t offset, std::string_view data) {
-            cmd.push_constants(pipeline, offset, static_cast<uint32_t>(data.size()), data.data());
+        .def("push_constants", [](std::shared_ptr<CommandBuffer> self, std::shared_ptr<Pipeline> pipeline,
+                                  uint32_t offset, std::string_view data) {
+            self->push_constants(std::move(pipeline), offset, static_cast<uint32_t>(data.size()), data.data());
+            return self;
         }, py::arg("pipeline"), py::arg("offset"), py::arg("data"))
-        .def("bind_descriptor_set", &CommandBuffer::bind_descriptor_set,
-             py::arg("descriptor_set"), py::arg("pipeline"), py::arg("set"));
+        .def("bind_descriptor_set", [](std::shared_ptr<CommandBuffer> self, std::shared_ptr<DescriptorSet> descriptor_set,
+                                       std::shared_ptr<Pipeline> pipeline, uint32_t set) {
+            self->bind_descriptor_set(std::move(descriptor_set), std::move(pipeline), set);
+            return self;
+        }, py::arg("descriptor_set"), py::arg("pipeline"), py::arg("set"));
+
+    py::class_<RenderingScope>(m, "RenderingScope")
+        .def("__enter__", [](RenderingScope& self) {
+            self.cmd->begin_rendering(self.target, self.clear_color);
+            return self.cmd;
+        })
+        .def("__exit__", [](RenderingScope& self, py::object, py::object, py::object) {
+            self.cmd->end_rendering(self.target);
+            return false;  // never swallow exceptions
+        });
 
     // ── Window (GLFW) ──
     py::class_<Window>(m, "Window")
