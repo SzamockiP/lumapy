@@ -87,3 +87,29 @@ def test_sized_buffer_without_data(ctx):
 def test_bytes_upload(ctx):
     buf = ctx.create_buffer(64, bz.BufferType.UNIFORM, bz.MemoryUsage.DYNAMIC)
     buf.update(b"\x00" * 64)
+
+
+# ── read() — 0.5 ──────────────────────────────────────────────────────────
+
+
+def test_static_buffer_reads_back_what_was_uploaded(ctx):
+    """STATIC read() is a GPU round trip: device-local memory is not mappable."""
+    data = np.arange(16, dtype=np.float32)
+    buf = ctx.create_buffer(data, bz.BufferType.STORAGE, bz.MemoryUsage.STATIC)
+    np.testing.assert_array_equal(buf.read(np.float32), data)
+
+
+def test_dynamic_buffer_read_returns_the_latest_update(ctx):
+    """DYNAMIC read() maps the current frame's copy — no GPU involved."""
+    buf = ctx.create_buffer(16, bz.BufferType.UNIFORM, bz.MemoryUsage.DYNAMIC)
+    payload = np.array([1.5, -2.0, 3.25, 0.0], dtype=np.float32)
+    buf.update(payload)  # numpy straight in, no bytes(...) dance
+    np.testing.assert_array_equal(buf.read(np.float32), payload)
+
+
+def test_read_dtype_is_respected(ctx):
+    data = np.arange(8, dtype=np.uint32)
+    buf = ctx.create_buffer(data, bz.BufferType.STORAGE, bz.MemoryUsage.STATIC)
+    out = buf.read(np.uint32)
+    assert out.dtype == np.uint32
+    np.testing.assert_array_equal(out, data)

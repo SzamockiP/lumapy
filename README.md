@@ -20,8 +20,10 @@ and the Vulkan SDK.
 - **Easy to Use Interface:** Write clear and concise code with an intuitive API.
 - **Automatic Shader Compilation:** Compile GLSL shaders (Vertex/Fragment) directly from your code.
 - **Pipeline & Buffer Management:** Easy builder pattern for graphics pipelines and unified buffer creation.
-- **Command Buffers:** Explicit, yet simple command recording for drawing operations.
+- **Command Buffers:** Explicit, yet simple command recording — calls chain (`cmd.bind_pipeline(p).draw(3)`), and `with cmd.rendering(target):` closes the pass for you.
+- **Asynchronous Texture Streaming:** `ctx.load_image()` returns immediately while the decode and GPU copy run in the background; anything that samples the image waits for it automatically. `ctx.upload_progress` gives you a loading bar for free.
 - **Headless Rendering:** Draw into an offscreen `RenderTarget` and read the pixels back as a NumPy array — no window, no display required.
+- **Render-to-Texture, MRT & Shadow Maps:** Target attachments are ordinary `Image` objects in any supported `Format` — sample `target.color[0]` or a depth-only target's `target.depth` like any texture.
 - **Runs Widely:** Vulkan 1.2 baseline with 1.3 used where available, so bazalt runs on older integrated GPUs too. Capabilities are requested by name, never by version or extension.
 - **Decoupled Architecture:** Clean separation of concerns between Windowing (GLFW), Vulkan Context (GPU initialization), and render targets — a window is one target among others.
 
@@ -51,11 +53,8 @@ vbuf = ctx.create_buffer([
 
 cmd = ctx.create_command_buffer()
 cmd.begin()
-cmd.begin_rendering(target, clear_color=[0.1, 0.2, 0.3, 1.0])
-cmd.bind_pipeline(pipeline)
-cmd.bind_vertex_buffer(vbuf)
-cmd.draw(3)
-cmd.end_rendering(target)
+with cmd.rendering(target, clear_color=[0.1, 0.2, 0.3, 1.0]) as c:
+    c.bind_pipeline(pipeline).bind_vertex_buffer(vbuf).draw(3)
 
 ctx.submit(cmd)
 

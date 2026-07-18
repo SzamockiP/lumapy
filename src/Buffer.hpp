@@ -49,6 +49,12 @@ public:
             "create the buffer with MemoryUsage.DYNAMIC instead"));
     }
 
+    // Copies the buffer's contents back to host memory. Buffers carry no
+    // format (unlike Images), so the caller supplies the dtype at the binding
+    // layer. STATIC buffers take a blocking GPU round trip; DYNAMIC ones map
+    // the current frame's copy directly.
+    virtual std::expected<std::vector<std::byte>, Error> read_bytes() = 0;
+
     // Remembered so bind_index_buffer doesn't have to assume. It used to hardcode
     // VK_INDEX_TYPE_UINT32 while create_buffer happily accepted UINT16 indices,
     // which were then read back at half the count with no error.
@@ -88,8 +94,56 @@ public:
     VkBuffer get() const override { return buffer_; }
     size_t size() const override { return size_; }
 
+    // Blocking round trip through a readback staging buffer — device-local
+    // memory is not mappable. A debugging/test path (SSBO results, mostly).
+    std::expected<std::vector<std::byte>, Error> read_bytes() override {
+        VkBufferCreateInfo stagingInfo{
+            .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
+            .pNext = nullptr,
+            .flags = 0,
+            .size = size_,
+            .usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+            .sharingMode = VK_SHARING_MODE_EXCLUSIVE,
+            .queueFamilyIndexCount = 0,
+            .pQueueFamilyIndices = nullptr
+        };
+        VmaAllocationCreateInfo allocInfo{};
+        allocInfo.usage = VMA_MEMORY_USAGE_GPU_TO_CPU;
+        allocInfo.flags = VMA_ALLOCATION_CREATE_HOST_ACCESS_RANDOM_BIT;
+
+        VkBuffer staging = VK_NULL_HANDLE;
+        VmaAllocation staging_alloc = VK_NULL_HANDLE;
+        if (auto e = check(vmaCreateBuffer(context_->allocator(), &stagingInfo, &allocInfo,
+                                           &staging, &staging_alloc, nullptr),
+                           "create buffer readback staging", ErrorCode::Resource)) {
+            return std::unexpected(*e);
+        }
+
+        auto submitted = immediate_submit(*context_, [&](VkCommandBuffer cmd) {
+            VkBufferCopy region{ .srcOffset = 0, .dstOffset = 0, .size = size_ };
+            vkCmdCopyBuffer(cmd, buffer_, staging, 1, &region);
+        });
+        if (!submitted) {
+            vmaDestroyBuffer(context_->allocator(), staging, staging_alloc);
+            return std::unexpected(submitted.error());
+        }
+
+        std::vector<std::byte> out(size_);
+        void* mapped = nullptr;
+        if (auto e = check(vmaMapMemory(context_->allocator(), staging_alloc, &mapped),
+                           "map buffer readback staging", ErrorCode::Resource)) {
+            vmaDestroyBuffer(context_->allocator(), staging, staging_alloc);
+            return std::unexpected(*e);
+        }
+        std::memcpy(out.data(), mapped, size_);
+        vmaUnmapMemory(context_->allocator(), staging_alloc);
+        vmaDestroyBuffer(context_->allocator(), staging, staging_alloc);
+        return out;
+    }
+
     static std::expected<std::shared_ptr<StaticBuffer>, Error> create(Context& context, const void* data, size_t data_size, BufferType type) {
-        VkBufferUsageFlags usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+        // TRANSFER_SRC so read() can copy the contents back out.
+        VkBufferUsageFlags usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
         switch (type) {
             case BufferType::VERTEX: usage |= VK_BUFFER_USAGE_VERTEX_BUFFER_BIT; break;
             case BufferType::INDEX: usage |= VK_BUFFER_USAGE_INDEX_BUFFER_BIT; break;
@@ -216,6 +270,21 @@ public:
     bool is_dynamic() const override { return true; }
     VkBuffer get_for_frame(uint32_t frame) const override { return buffers_[frame]; }
     BufferType buffer_type() const { return type_; }
+
+    // Host-visible: map the current frame's copy, no GPU round trip. Note the
+    // GPU may not have consumed it yet — this reads what update() wrote.
+    std::expected<std::vector<std::byte>, Error> read_bytes() override {
+        const uint32_t frame = context_->frame_index();
+        void* mapped = nullptr;
+        if (auto e = check(vmaMapMemory(context_->allocator(), allocations_[frame], &mapped),
+                           "map dynamic buffer for read", ErrorCode::Resource)) {
+            return std::unexpected(*e);
+        }
+        std::vector<std::byte> out(size_);
+        std::memcpy(out.data(), mapped, size_);
+        vmaUnmapMemory(context_->allocator(), allocations_[frame]);
+        return out;
+    }
 
     std::expected<void, Error> update(std::span<const std::byte> data) override {
         if (data.size() > size_) {

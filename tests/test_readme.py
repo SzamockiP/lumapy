@@ -32,11 +32,8 @@ def test_readme_headless_quickstart(ctx):
 
     cmd = ctx.create_command_buffer()
     cmd.begin()
-    cmd.begin_rendering(target, clear_color=[0.1, 0.2, 0.3, 1.0])
-    cmd.bind_pipeline(pipeline)
-    cmd.bind_vertex_buffer(vbuf)
-    cmd.draw(3)
-    cmd.end_rendering(target)
+    with cmd.rendering(target, clear_color=[0.1, 0.2, 0.3, 1.0]) as c:
+        c.bind_pipeline(pipeline).bind_vertex_buffer(vbuf).draw(3)
 
     ctx.submit(cmd)
 

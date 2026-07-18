@@ -189,6 +189,16 @@ class Buffer:
         ...
     def update(self, list: list, data_type: Optional[DataType] = None) -> None: ...
 
+    def read(self, dtype: Any) -> Any:
+        """Copy the buffer back to host memory as a 1-D numpy array.
+
+        dtype is mandatory — buffers carry no format, so the caller says how
+        to interpret the bytes (e.g. `ssbo.read(np.float32)`). STATIC buffers
+        take a blocking GPU round trip; DYNAMIC ones return what update()
+        last wrote into the current frame's copy.
+        """
+        ...
+
 class ShaderModule: ...
 
 class Image:

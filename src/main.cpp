@@ -425,6 +425,13 @@ void context_submit(Context& context, std::shared_ptr<CommandBuffer> cmd) {
 PYBIND11_MODULE(_core, m) {
     m.doc() = "Bazalt native core module";
 
+    // Logger drain threads call into Python; joining them after the
+    // interpreter starts finalizing crashes ("could not acquire lock for
+    // stderr at interpreter shutdown"). atexit runs while Python is intact,
+    // so every script that ends with a live Context exits cleanly.
+    py::module_::import("atexit").attr("register")(
+        py::cpp_function([]() { Logger::shutdown_all(); }));
+
     register_exceptions(m);
 
     // py::arithmetic() so `msg.severity >= bz.Severity.WARNING` works — filtering
@@ -552,7 +559,22 @@ PYBIND11_MODULE(_core, m) {
             with_list_bytes(list, actualType, [&](const void* data, size_t nbytes) {
                 unwrap(buffer.update({static_cast<const std::byte*>(data), nbytes}), nullptr);
             });
-        }, py::arg("list"), py::arg("data_type") = py::none());
+        }, py::arg("list"), py::arg("data_type") = py::none())
+        // dtype is mandatory: buffers carry no format (unlike Images), so the
+        // caller has to say how to interpret the bytes.
+        .def("read", [](Buffer& self, py::object dtype) -> py::array {
+            auto bytes = unwrap(self.read_bytes(), nullptr);
+            const py::dtype dt = py::dtype::from_args(dtype);
+            const auto itemsize = static_cast<size_t>(dt.itemsize());
+            if (itemsize == 0 || bytes.size() % itemsize != 0) {
+                raise_error(err_resource(std::format(
+                    "Buffer.read: buffer size {} is not a multiple of the dtype's "
+                    "item size {}", bytes.size(), itemsize)));
+            }
+            py::array out(dt, static_cast<py::ssize_t>(bytes.size() / itemsize));
+            std::memcpy(out.mutable_data(), bytes.data(), bytes.size());
+            return out;
+        }, py::arg("dtype"));
     
     py::class_<ShaderModule, std::shared_ptr<ShaderModule>>(m, "ShaderModule");
 

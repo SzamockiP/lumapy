@@ -43,7 +43,7 @@ from bazalt._core import (  # noqa: F401 — explicit re-exports for IDE visibil
     ResourceError,
 )
 
-__version__ = "0.4.2"
+__version__ = "0.5.0"
 
 __all__ = [
     # Core
