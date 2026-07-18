@@ -44,11 +44,17 @@ public:
         return cmd;
     }
 
+    // Deferred: a per-frame VkCommandBuffer may still be executing when the
+    // Python object is dropped.
     ~CommandBuffer() {
         if (context_) {
-            vkFreeCommandBuffers(context_->device(), context_->command_pool(),
-                                 static_cast<uint32_t>(command_buffers_.size()),
-                                 command_buffers_.data());
+            context_->defer_destroy(
+                [device = context_->device(), pool = context_->command_pool(),
+                 buffers = std::move(command_buffers_)] {
+                    vkFreeCommandBuffers(device, pool,
+                                         static_cast<uint32_t>(buffers.size()),
+                                         buffers.data());
+                });
         }
     }
 

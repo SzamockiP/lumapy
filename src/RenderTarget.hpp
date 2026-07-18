@@ -154,16 +154,23 @@ public:
 		return target;
 	}
 
+	// Deferred: an in-flight frame may still be rendering into (or sampling)
+	// these attachments.
 	~OffscreenTarget() override
 	{
 		if (!context_)
 		{
 			return;
 		}
-		if (depth_view_) vkDestroyImageView(context_->device(), depth_view_, nullptr);
-		if (depth_image_) vmaDestroyImage(context_->allocator(), depth_image_, depth_allocation_);
-		if (color_view_) vkDestroyImageView(context_->device(), color_view_, nullptr);
-		if (color_image_) vmaDestroyImage(context_->allocator(), color_image_, color_allocation_);
+		context_->defer_destroy(
+			[device = context_->device(), allocator = context_->allocator(),
+			 depth_view = depth_view_, depth_image = depth_image_, depth_allocation = depth_allocation_,
+			 color_view = color_view_, color_image = color_image_, color_allocation = color_allocation_] {
+				if (depth_view) vkDestroyImageView(device, depth_view, nullptr);
+				if (depth_image) vmaDestroyImage(allocator, depth_image, depth_allocation);
+				if (color_view) vkDestroyImageView(device, color_view, nullptr);
+				if (color_image) vmaDestroyImage(allocator, color_image, color_allocation);
+			});
 	}
 
 	OffscreenTarget(const OffscreenTarget&) = delete;

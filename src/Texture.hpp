@@ -18,17 +18,22 @@ public:
         : context_(context), image_(image), allocation_(allocation),
           image_view_(imageView), sampler_(sampler), width_(width), height_(height) {}
 
+    // Deferred: an in-flight frame may still sample this texture.
     ~Texture() {
         if (context_) {
-            if (sampler_ != VK_NULL_HANDLE) {
-                vkDestroySampler(context_->device(), sampler_, nullptr);
-            }
-            if (image_view_ != VK_NULL_HANDLE) {
-                vkDestroyImageView(context_->device(), image_view_, nullptr);
-            }
-            if (image_ != VK_NULL_HANDLE && allocation_ != VK_NULL_HANDLE) {
-                vmaDestroyImage(context_->allocator(), image_, allocation_);
-            }
+            context_->defer_destroy(
+                [device = context_->device(), allocator = context_->allocator(),
+                 sampler = sampler_, view = image_view_, image = image_, allocation = allocation_] {
+                    if (sampler != VK_NULL_HANDLE) {
+                        vkDestroySampler(device, sampler, nullptr);
+                    }
+                    if (view != VK_NULL_HANDLE) {
+                        vkDestroyImageView(device, view, nullptr);
+                    }
+                    if (image != VK_NULL_HANDLE && allocation != VK_NULL_HANDLE) {
+                        vmaDestroyImage(allocator, image, allocation);
+                    }
+                });
         }
     }
 

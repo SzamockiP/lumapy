@@ -4,12 +4,15 @@
 #include <vk_mem_alloc.h>
 
 #include <atomic>
+#include <deque>
 #include <expected>
 #include <format>
+#include <functional>
 #include <memory>
 #include <mutex>
 #include <set>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "Error.hpp"
@@ -131,6 +134,14 @@ public:
 			vkDeviceWaitIdle(vkb_device_.device);
 		}
 
+		// Everything is complete now; run whatever is still queued before the
+		// pool and allocator below disappear out from under the lambdas.
+		for (auto& [serial, fn] : deletion_queue_)
+		{
+			fn();
+		}
+		deletion_queue_.clear();
+
 		if (command_pool_)
 		{
 			vkDestroyCommandPool(vkb_device_.device, command_pool_, nullptr);
@@ -210,6 +221,43 @@ public:
 	std::uint64_t advance_frame()
 	{
 		return ++frame_serial_;
+	}
+
+	// ── Deferred destruction ──────────────────────────────────────────────────
+	//
+	// A handle dropped on the CPU may still be referenced by a frame the GPU is
+	// working through, so resource destructors enqueue their vkDestroy calls
+	// here instead of running them inline. Entries run once the GPU has provably
+	// passed the frame that could last have referenced them.
+	//
+	// The lambdas capture raw handles plus the VkDevice/VmaAllocator values —
+	// never a shared_ptr<Context>, which would keep the Context alive from its
+	// own member and leak everything.
+	void defer_destroy(std::function<void()> fn)
+	{
+		deletion_queue_.emplace_back(frame_serial_, std::move(fn));
+	}
+
+	// The GPU has provably completed every submission up to and including the
+	// frame with this serial. The graphics queue completes work in submission
+	// order, so one proof point covers everything before it.
+	void mark_serial_completed(std::uint64_t serial)
+	{
+		if (serial > completed_serial_)
+		{
+			completed_serial_ = serial;
+		}
+	}
+
+	void flush_deletion_queue()
+	{
+		// Serials are enqueued in non-decreasing order, so the front is always
+		// the oldest entry.
+		while (!deletion_queue_.empty() && deletion_queue_.front().first <= completed_serial_)
+		{
+			deletion_queue_.front().second();
+			deletion_queue_.pop_front();
+		}
 	}
 
 	// Guards against two SwapchainRenderers fighting over the frame ring.
@@ -643,4 +691,6 @@ private:
 
 	std::uint32_t frames_in_flight_ = 2;
 	std::uint64_t frame_serial_ = 0;
+	std::uint64_t completed_serial_ = 0;
+	std::deque<std::pair<std::uint64_t, std::function<void()>>> deletion_queue_;
 };

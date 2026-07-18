@@ -336,6 +336,10 @@ void context_submit(Context& context, std::shared_ptr<CommandBuffer> cmd) {
         raise_error(*e);
     }
 
+    // The wait-idle above proves everything through the current frame is done.
+    context.mark_serial_completed(context.frame_serial());
+    context.flush_deletion_queue();
+
     // A headless submit is a frame too: advance the ring so DynamicBuffer
     // slots and frame descriptor sets rotate (this path used to sit on slot 0
     // forever). After, not before, submitting — an update() made before this

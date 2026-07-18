@@ -70,9 +70,15 @@ public:
     StaticBuffer(std::shared_ptr<Context> context, VkBuffer buffer, VmaAllocation allocation, size_t size)
         : context_(context), buffer_(buffer), allocation_(allocation), size_(size) {}
 
+    // Deferred: the handle may still be referenced by an in-flight frame —
+    // cmd.begin() drops the shared_ptrs that kept it alive while the previous
+    // frame is still being consumed by the GPU.
     ~StaticBuffer() override {
         if (buffer_ != VK_NULL_HANDLE && context_) {
-            vmaDestroyBuffer(context_->allocator(), buffer_, allocation_);
+            context_->defer_destroy(
+                [allocator = context_->allocator(), buffer = buffer_, allocation = allocation_] {
+                    vmaDestroyBuffer(allocator, buffer, allocation);
+                });
         }
     }
 
@@ -187,11 +193,15 @@ public:
 
     ~DynamicBuffer() override {
         if (context_) {
-            for (size_t i = 0; i < buffers_.size(); ++i) {
-                if (buffers_[i] != VK_NULL_HANDLE) {
-                    vmaDestroyBuffer(context_->allocator(), buffers_[i], allocations_[i]);
-                }
-            }
+            context_->defer_destroy(
+                [allocator = context_->allocator(), buffers = std::move(buffers_),
+                 allocations = std::move(allocations_)] {
+                    for (size_t i = 0; i < buffers.size(); ++i) {
+                        if (buffers[i] != VK_NULL_HANDLE) {
+                            vmaDestroyBuffer(allocator, buffers[i], allocations[i]);
+                        }
+                    }
+                });
         }
     }
 

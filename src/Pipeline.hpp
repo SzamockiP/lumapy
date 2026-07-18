@@ -121,21 +121,27 @@ public:
 private:
     // One teardown for the destructor and move-assignment; it used to be written
     // out twice and the two copies had already started to drift.
+    // Deferred: an in-flight frame may still be executing with this pipeline
+    // bound.
     void destroy() {
         if (!context_) {
             return;
         }
-        if (pipeline_ != VK_NULL_HANDLE) {
-            vkDestroyPipeline(context_->device(), pipeline_, nullptr);
-        }
-        if (layout_ != VK_NULL_HANDLE) {
-            vkDestroyPipelineLayout(context_->device(), layout_, nullptr);
-        }
-        for (auto dl : desc_layouts_) {
-            if (dl != VK_NULL_HANDLE) {
-                vkDestroyDescriptorSetLayout(context_->device(), dl, nullptr);
-            }
-        }
+        context_->defer_destroy(
+            [device = context_->device(), pipeline = pipeline_, layout = layout_,
+             desc_layouts = desc_layouts_] {
+                if (pipeline != VK_NULL_HANDLE) {
+                    vkDestroyPipeline(device, pipeline, nullptr);
+                }
+                if (layout != VK_NULL_HANDLE) {
+                    vkDestroyPipelineLayout(device, layout, nullptr);
+                }
+                for (auto dl : desc_layouts) {
+                    if (dl != VK_NULL_HANDLE) {
+                        vkDestroyDescriptorSetLayout(device, dl, nullptr);
+                    }
+                }
+            });
     }
 
     std::shared_ptr<Context> context_;

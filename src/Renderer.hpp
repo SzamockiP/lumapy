@@ -284,6 +284,15 @@ public:
 
 		vkWaitForFences(context_->device(), 1, &in_flight_fences_[current_frame()], VK_TRUE, UINT64_MAX);
 
+		// The fence just waited was last signalled by the submission that used
+		// this ring slot — frames_in_flight frames ago. That frame is done, so
+		// handles dropped up to then are safe to destroy.
+		if (context_->frame_serial() > context_->frames_in_flight())
+		{
+			context_->mark_serial_completed(context_->frame_serial() - context_->frames_in_flight());
+		}
+		context_->flush_deletion_queue();
+
 		VkResult result = vkAcquireNextImageKHR(
 			context_->device(),
 			swapchain_,

@@ -88,5 +88,10 @@ std::expected<void, Error> immediate_submit(Context& context, F&& record)
     }
 
     vkFreeCommandBuffers(context.device(), context.command_pool(), 1, &cmd);
+
+    // The wait-idle above proves everything submitted so far has completed —
+    // a free chance to reclaim deferred handles.
+    context.mark_serial_completed(context.frame_serial());
+    context.flush_deletion_queue();
     return {};
 }
