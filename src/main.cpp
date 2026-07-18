@@ -311,6 +311,28 @@ std::expected<void, Error> Frame::submit(std::shared_ptr<CommandBuffer> cmd) {
     return {};
 }
 
+// Readback shaped for numpy: (h, w, channels) — or (h, w) for single-channel
+// formats — with the dtype the format table dictates. Shared by Image.read and
+// RenderTarget.read_pixels.
+py::array image_to_numpy(Image& image) {
+    auto bytes = unwrap(image.read(), nullptr);
+    const FormatInfo info = format_info(image.format());
+
+    std::vector<py::ssize_t> shape;
+    if (info.channels == 1) {
+        shape = { static_cast<py::ssize_t>(image.height()),
+                  static_cast<py::ssize_t>(image.width()) };
+    } else {
+        shape = { static_cast<py::ssize_t>(image.height()),
+                  static_cast<py::ssize_t>(image.width()),
+                  static_cast<py::ssize_t>(info.channels) };
+    }
+
+    py::array out(py::dtype(info.numpy_dtype), shape);
+    std::memcpy(out.mutable_data(), bytes.data(), bytes.size());
+    return out;
+}
+
 void context_submit(Context& context, std::shared_ptr<CommandBuffer> cmd) {
     VkCommandBuffer vkCmd = record_frame(*cmd, context.frame_index());
 
@@ -497,22 +519,7 @@ PYBIND11_MODULE(_core, m) {
             unwrap(self.wait(), nullptr);
         })
         .def("read", [](Image& self) -> py::array {
-            auto bytes = unwrap(self.read(), nullptr);
-            const FormatInfo info = format_info(self.format());
-
-            std::vector<py::ssize_t> shape;
-            if (info.channels == 1) {
-                shape = { static_cast<py::ssize_t>(self.height()),
-                          static_cast<py::ssize_t>(self.width()) };
-            } else {
-                shape = { static_cast<py::ssize_t>(self.height()),
-                          static_cast<py::ssize_t>(self.width()),
-                          static_cast<py::ssize_t>(info.channels) };
-            }
-
-            py::array out(py::dtype(info.numpy_dtype), shape);
-            std::memcpy(out.mutable_data(), bytes.data(), bytes.size());
-            return out;
+            return image_to_numpy(self);
         });
 
     py::class_<Sampler, std::shared_ptr<Sampler>>(m, "Sampler");
@@ -798,25 +805,61 @@ PYBIND11_MODULE(_core, m) {
     py::class_<RenderTarget, std::shared_ptr<RenderTarget>>(m, "RenderTargetBase");
 
     py::class_<OffscreenTarget, RenderTarget, std::shared_ptr<OffscreenTarget>>(m, "RenderTarget")
-        .def(py::init([](Context& context, std::uint32_t width, std::uint32_t height, bool depth) {
-            return unwrap(OffscreenTarget::create(context, width, height, depth), context.logger().get());
-        }), py::arg("context"), py::arg("width"), py::arg("height"), py::arg("depth") = false)
+        // color: None | Format | [Format, ...]; depth: None | Format. A bool
+        // depth is refused with a migration hint (it was one in 0.4).
+        .def(py::init([](Context& context, std::uint32_t width, std::uint32_t height,
+                         py::object color, py::object depth) {
+            std::vector<Format> colors;
+            if (!color.is_none()) {
+                if (py::isinstance<Format>(color)) {
+                    colors.push_back(color.cast<Format>());
+                } else if (py::isinstance<py::sequence>(color) && !py::isinstance<py::str>(color)) {
+                    for (auto item : color.cast<py::sequence>()) {
+                        colors.push_back(item.cast<Format>());
+                    }
+                } else {
+                    raise_error(err_resource(
+                        "color must be a bz.Format, a list of them, or None"));
+                }
+            }
+
+            std::optional<Format> depth_format;
+            if (!depth.is_none()) {
+                if (py::isinstance<py::bool_>(depth)) {
+                    raise_error(err_resource(
+                        "depth is a pixel format now: pass depth=bz.Format.D32F "
+                        "instead of depth=True"));
+                }
+                depth_format = depth.cast<Format>();
+            }
+
+            return unwrap(OffscreenTarget::create(context, width, height,
+                                                  std::move(colors), depth_format),
+                          context.logger().get());
+        }), py::arg("context"), py::arg("width"), py::arg("height"),
+            py::arg("color") = Format::RGBA8, py::arg("depth") = py::none())
         .def_property_readonly("width", [](const OffscreenTarget& t) { return t.extent().width; })
         .def_property_readonly("height", [](const OffscreenTarget& t) { return t.extent().height; })
-        .def("read_pixels", [](OffscreenTarget& self) -> py::array {
-            auto res = self.read_pixels();
-            if (!res) {
-                raise_error(res.error());
+        // The attachments are ordinary Images — this is the whole
+        // render-to-texture API: target.color[0] / target.depth into set_image.
+        .def_property_readonly("color", [](const OffscreenTarget& t) {
+            py::tuple out(t.colors().size());
+            for (size_t i = 0; i < t.colors().size(); ++i) {
+                out[i] = py::cast(t.colors()[i]);
             }
-            const std::uint32_t h = self.extent().height;
-            const std::uint32_t w = self.extent().width;
-            // Shaped (h, w, 4) so it drops straight into numpy/PIL comparisons —
-            // the whole point of readback is comparing against a golden image.
-            py::array_t<std::uint8_t> out({ static_cast<py::ssize_t>(h),
-                                            static_cast<py::ssize_t>(w),
-                                            static_cast<py::ssize_t>(4) });
-            std::memcpy(out.mutable_data(), res->data(), res->size());
             return out;
+        })
+        .def_property_readonly("depth", [](const OffscreenTarget& t) -> py::object {
+            return t.depth() ? py::cast(t.depth()) : py::none();
+        })
+        // Kept as the ergonomic spelling for colour 0; the general form is
+        // target.color[i].read().
+        .def("read_pixels", [](OffscreenTarget& self) -> py::array {
+            if (self.colors().empty()) {
+                raise_error(err_resource(
+                    "read_pixels() on a depth-only RenderTarget; read target.depth instead"));
+            }
+            return image_to_numpy(*self.colors()[0]);
         });
 
     // ── SwapchainRenderer ──

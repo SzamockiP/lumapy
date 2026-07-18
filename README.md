@@ -34,7 +34,7 @@ and tests:
 import bazalt as bz
 
 ctx = bz.Context()
-target = bz.RenderTarget(ctx, 800, 600, depth=True)
+target = bz.RenderTarget(ctx, 800, 600, depth=bz.Format.D32F)
 
 pipeline = (ctx.pipeline_builder()
     .vertex_shader(ctx.compile_shader("triangle.vert", bz.ShaderStage.VERTEX))

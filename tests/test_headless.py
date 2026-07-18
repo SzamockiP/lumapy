@@ -63,7 +63,7 @@ def test_read_pixels_before_any_render_is_an_error(ctx):
     target = bz.RenderTarget(ctx, 32, 32)
     with pytest.raises(bz.ResourceError) as info:
         target.read_pixels()
-    assert "never been rendered" in str(info.value)
+    assert "no contents" in str(info.value)
 
 
 def test_recorded_but_unsubmitted_commands_do_not_count_as_rendering(ctx):
@@ -107,7 +107,7 @@ def test_vertex_colours_are_interpolated(ctx, triangle_shaders, triangle_buffers
 
 
 def test_depth_target_renders(ctx, triangle_shaders, triangle_buffers):
-    target = bz.RenderTarget(ctx, 64, 64, depth=True)
+    target = bz.RenderTarget(ctx, 64, 64, depth=bz.Format.D32F)
     pixels = draw_triangle(ctx, target, triangle_shaders, triangle_buffers)
     assert not np.allclose(pixels[32, 32, :3], CLEAR_RGB, atol=2)
 

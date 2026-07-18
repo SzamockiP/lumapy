@@ -254,10 +254,25 @@ class RenderTargetBase:
     ...
 
 class RenderTarget(RenderTargetBase):
-    """An offscreen target backed by its own images. No window required."""
+    """An offscreen target backed by its own Images. No window required.
+
+    The attachments are ordinary Images: `target.color[0]` and `target.depth`
+    go straight into DescriptorSet.set_image — that is the whole
+    render-to-texture and shadow-map API.
+    """
 
     def __init__(self, context: Context, width: int, height: int,
-                 depth: bool = False) -> None: ...
+                 color: Optional[Format | Sequence[Format]] = Format.RGBA8,
+                 depth: Optional[Format] = None) -> None:
+        """color=None with depth=D32F makes a depth-only (shadow) target;
+        a list of formats makes an MRT target. At least one attachment is
+        required."""
+        ...
+
+    @property
+    def color(self) -> tuple[Image, ...]: ...
+    @property
+    def depth(self) -> Optional[Image]: ...
 
     @property
     def width(self) -> int: ...

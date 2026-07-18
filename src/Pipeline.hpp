@@ -231,12 +231,20 @@ public:
     // A short sequence of named steps. The ~300-line monolith this replaces mixed
     // descriptor-layout creation, vertex-input translation and fixed state into
     // one scroll, with the cleanup loop copy-pasted into every failure branch.
-    std::expected<std::shared_ptr<Pipeline>, Error> build(VkFormat colorFormat, VkFormat depthFormat) {
-        if (!vertex_shader_ || !fragment_shader_) {
-            return std::unexpected(err_shader("Vertex and fragment shaders must be provided"));
+    std::expected<std::shared_ptr<Pipeline>, Error> build(std::vector<VkFormat> colorFormats, VkFormat depthFormat) {
+        if (!vertex_shader_) {
+            return std::unexpected(err_shader("A vertex shader must be provided"));
+        }
+        // A fragment shader is optional only when there is nothing to shade:
+        // a depth-only pass (shadow maps) rasterizes straight into the depth
+        // attachment and is valid Vulkan without one.
+        if (!fragment_shader_ && !colorFormats.empty()) {
+            return std::unexpected(err_shader(
+                "A fragment shader must be provided when the target has colour "
+                "attachments (only depth-only targets can omit it)"));
         }
 
-        const std::array<VkPipelineShaderStageCreateInfo, 2> shaderStages = shader_stages_();
+        const std::vector<VkPipelineShaderStageCreateInfo> shaderStages = shader_stages_();
 
         // Descriptor set layouts — owned by the guard until the Pipeline exists.
         std::vector<VkDescriptorSetLayout> descriptorSetLayouts;
@@ -306,7 +314,10 @@ public:
             .alphaToOneEnable = VK_FALSE
         };
 
-        const VkPipelineColorBlendAttachmentState colorBlendAttachment = color_blend_attachment_();
+        // One blend state per colour attachment (identical for now; per-target
+        // blend control can arrive additively).
+        const std::vector<VkPipelineColorBlendAttachmentState> blendAttachments(
+            colorFormats.size(), color_blend_attachment_());
 
         VkPipelineColorBlendStateCreateInfo colorBlending{
             .sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO,
@@ -314,8 +325,8 @@ public:
             .flags = 0,
             .logicOpEnable = VK_FALSE,
             .logicOp = VK_LOGIC_OP_COPY,
-            .attachmentCount = 1,
-            .pAttachments = &colorBlendAttachment,
+            .attachmentCount = static_cast<uint32_t>(blendAttachments.size()),
+            .pAttachments = blendAttachments.data(),
             .blendConstants = {0.0f, 0.0f, 0.0f, 0.0f}
         };
 
@@ -335,8 +346,8 @@ public:
             .sType = VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO,
             .pNext = nullptr,
             .viewMask = 0,
-            .colorAttachmentCount = 1,
-            .pColorAttachmentFormats = &colorFormat,
+            .colorAttachmentCount = static_cast<uint32_t>(colorFormats.size()),
+            .pColorAttachmentFormats = colorFormats.empty() ? nullptr : colorFormats.data(),
             .depthAttachmentFormat = depthFormat != VK_FORMAT_UNDEFINED ? depthFormat : VK_FORMAT_UNDEFINED,
             .stencilAttachmentFormat = VK_FORMAT_UNDEFINED
         };
@@ -388,24 +399,32 @@ public:
     // Convenience overload: a RenderTarget already knows its own formats, so the
     // caller shouldn't have to dig them out. This is what replaces build(renderer).
     std::expected<std::shared_ptr<Pipeline>, Error> build(const RenderTarget& target) {
-        return build(target.color_format(0), target.depth_format());
+        std::vector<VkFormat> colorFormats;
+        colorFormats.reserve(target.color_count());
+        for (std::uint32_t i = 0; i < target.color_count(); ++i) {
+            colorFormats.push_back(target.color_format(i));
+        }
+        return build(std::move(colorFormats), target.depth_format());
     }
 
 private:
     // ── build() steps ─────────────────────────────────────────────────────────
 
-    std::array<VkPipelineShaderStageCreateInfo, 2> shader_stages_() const {
-        return { {
-            {
-                .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
-                .pNext = nullptr,
-                .flags = 0,
-                .stage = VK_SHADER_STAGE_VERTEX_BIT,
-                .module = vertex_shader_->get(),
-                .pName = "main",
-                .pSpecializationInfo = nullptr
-            },
-            {
+    // 1 stage (depth-only) or 2. The fragment stage is optional exactly when
+    // the target has no colour attachments — build() enforces that pairing.
+    std::vector<VkPipelineShaderStageCreateInfo> shader_stages_() const {
+        std::vector<VkPipelineShaderStageCreateInfo> stages;
+        stages.push_back({
+            .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
+            .pNext = nullptr,
+            .flags = 0,
+            .stage = VK_SHADER_STAGE_VERTEX_BIT,
+            .module = vertex_shader_->get(),
+            .pName = "main",
+            .pSpecializationInfo = nullptr
+        });
+        if (fragment_shader_) {
+            stages.push_back({
                 .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
                 .pNext = nullptr,
                 .flags = 0,
@@ -413,8 +432,9 @@ private:
                 .module = fragment_shader_->get(),
                 .pName = "main",
                 .pSpecializationInfo = nullptr
-            }
-        } };
+            });
+        }
+        return stages;
     }
 
     // One VkDescriptorSetLayout per set index up to the highest one used; gap
