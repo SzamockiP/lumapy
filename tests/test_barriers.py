@@ -233,13 +233,18 @@ SYNC_SCRIPT = textwrap.dedent("""
     auto = mode == "auto"
 
     hazards = []
-    log = bz.Logger(min_severity=bz.Severity.WARNING)
+    log = bz.Logger(min_severity=bz.Severity.INFO)
 
     @log.on_message
     def _(msg):
+        if msg.source != bz.Source.VALIDATION:
+            return
+        # Dumped so a failing CI run shows what the layer actually said.
+        print("VMSG:", str(msg.severity), msg.text.replace(chr(10), " ")[:400],
+              file=sys.stderr)
         # "hazard detected" on recent layers, "Hazard WRITE_AFTER_WRITE" on
-        # older ones (e.g. the apt vulkan-validationlayers in CI).
-        if msg.source == bz.Source.VALIDATION and "hazard" in msg.text.lower():
+        # older ones.
+        if "hazard" in msg.text.lower():
             hazards.append(msg.text)
 
     ctx = bz.Context(log, validation="sync", auto_barriers=auto)
@@ -279,23 +284,27 @@ def run_sync_script(tmp_path, mode):
         [sys.executable, str(script), str(SHADER_DIR / "double.comp"), mode],
         capture_output=True, text=True, timeout=120)
     assert result.returncode == 0, result.stderr
+    dump = f"--- stdout ---\n{result.stdout}\n--- stderr ---\n{result.stderr}"
     for line in result.stdout.splitlines():
         if line.startswith("HAZARDS:"):
-            return int(line.split(":")[1])
-    pytest.fail(f"no HAZARDS line in output:\n{result.stdout}\n{result.stderr}")
+            return int(line.split(":")[1]), dump
+    pytest.fail(f"no HAZARDS line in output:\n{dump}")
 
 
 def test_missing_barrier_in_manual_mode_trips_sync_validation(ctx, tmp_path):
     """If this test fails, manual mode is not really manual (or sync validation
     is not really on) — either way the mode would be a lie."""
-    assert run_sync_script(tmp_path, "nobarrier") > 0
+    count, dump = run_sync_script(tmp_path, "nobarrier")
+    assert count > 0, dump
 
 
 def test_explicit_barrier_in_manual_mode_satisfies_sync_validation(ctx, tmp_path):
-    assert run_sync_script(tmp_path, "barrier") == 0
+    count, dump = run_sync_script(tmp_path, "barrier")
+    assert count == 0, dump
 
 
 def test_auto_barriers_satisfy_sync_validation(ctx, tmp_path):
     """The auto tracker's barriers hold up under the same referee that catches
     the missing ones — not just under core validation, which is blind here."""
-    assert run_sync_script(tmp_path, "auto") == 0
+    count, dump = run_sync_script(tmp_path, "auto")
+    assert count == 0, dump
