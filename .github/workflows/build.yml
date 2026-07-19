@@ -131,6 +131,17 @@ jobs:
       - name: Install wheel + test deps
         run: pip install wheelhouse/bazalt-*-cp312-*manylinux*.whl pytest numpy
 
+      # TEMPORARY diagnostic: force sync validation via the layer-settings
+      # FILE, bypassing the in-app VkValidationFeaturesEXT/VkLayerSettingEXT
+      # plumbing. Passing here + failing below = the plumbing is at fault;
+      # failing here too = the layer cannot see these hazards on this driver.
+      - name: Sync validation diagnostic (temporary)
+        continue-on-error: true
+        working-directory: ${{ runner.temp }}
+        run: |
+          printf 'khronos_validation.validate_sync = true\nkhronos_validation.syncval_shader_accesses_heuristic = true\n' > vk_layer_settings.txt
+          VK_LAYER_SETTINGS_PATH=$PWD/vk_layer_settings.txt python -m pytest "${{ github.workspace }}/tests/test_barriers.py::test_missing_barrier_in_manual_mode_trips_sync_validation" -q
+
       # cwd is OUTSIDE the repo on purpose: the source tree's bazalt/ package
       # has no _core and would shadow the installed wheel on sys.path.
       # VK_ICD_FILENAMES/VK_DRIVER_FILES come from the locate step's GITHUB_ENV.
