@@ -136,6 +136,15 @@ class Topology(IntEnum):
     POINT_LIST = 1
     LINE_LIST = 2
 
+class Access(IntEnum):
+    """What a command does to a buffer — the vocabulary of cmd.barrier()
+    in manual mode (auto_barriers=False)."""
+    SHADER_READ = 0
+    SHADER_WRITE = 1
+    VERTEX_READ = 2
+    INDEX_READ = 3
+    UNIFORM_READ = 4
+
 class Format(IntEnum):
     """Pixel formats.
 
@@ -391,6 +400,12 @@ class CommandBuffer:
     def dispatch(self, group_count_x: int, group_count_y: int = 1,
                  group_count_z: int = 1) -> CommandBuffer: ...
 
+    def barrier(self, buffer: Buffer, src: Access, dst: Access) -> CommandBuffer:
+        """Record a buffer barrier by hand. Required between dependent uses
+        when auto_barriers=False; legal (if redundant) in auto mode. Refused
+        inside a rendering scope — record it before begin_rendering."""
+        ...
+
     def push_constants(self, pipeline: Pipeline, offset: int, data: bytes) -> CommandBuffer:
         """The Pipeline already knows which stages its range covers."""
         ...
@@ -431,17 +446,24 @@ class Context:
     def __init__(self, logger: Optional[Logger] = None, validation: str = "auto",
                  features: Sequence[Feature] = (), optional: Sequence[Feature] = (),
                  frames_in_flight: int = 2,
-                 raw_extensions: Sequence[str] = ()) -> None:
+                 raw_extensions: Sequence[str] = (),
+                 auto_barriers: bool = True) -> None:
         """
         Args:
             logger: defaults to one printing warnings to stderr.
-            validation: "auto" (on when the layers are installed), "on", or "off".
+            validation: "auto" (on when the layers are installed), "on", "off",
+                or "sync" ("on" plus synchronization validation — the only mode
+                that reports missing barriers; costly, for debugging).
             features: required. Gates GPU selection; InitializationError if absent.
             optional: enabled when present; query with `supports()`.
             frames_in_flight: how many frames may be recorded ahead of the GPU
                 (1-4). 2 is the classic latency/throughput trade-off; 1 is
                 useful for debugging.
             raw_extensions: escape hatch. You shouldn't need this.
+            auto_barriers: barriers between resources (SSBO -> vertex read,
+                dispatch -> dispatch) are computed automatically at record time.
+                False makes every one of them your job via cmd.barrier().
+                Attachment layout transitions stay automatic either way.
         """
         ...
 
@@ -449,6 +471,8 @@ class Context:
     def logger(self) -> Logger: ...
     @property
     def frames_in_flight(self) -> int: ...
+    @property
+    def auto_barriers(self) -> bool: ...
     @property
     def device_name(self) -> str: ...
     @property
@@ -514,9 +538,12 @@ class Context:
                                uniform_buffers: int = 0,
                                storage_buffers: int = 0) -> DescriptorPool: ...
 
-    def create_command_buffer(self) -> CommandBuffer:
+    def create_command_buffer(self, auto_barriers: Optional[bool] = None) -> CommandBuffer:
         """Command buffers are a device resource, so they come from the Context —
-        a headless Context has no renderer to ask."""
+        a headless Context has no renderer to ask.
+
+        auto_barriers overrides the Context-wide mode for this one command
+        buffer; None inherits it."""
         ...
 
     def submit(self, cmd: CommandBuffer) -> None:

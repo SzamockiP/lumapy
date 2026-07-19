@@ -247,8 +247,9 @@ ValidationMode parse_validation(const std::string& value)
     if (value == "auto") return ValidationMode::Auto;
     if (value == "on")   return ValidationMode::On;
     if (value == "off")  return ValidationMode::Off;
+    if (value == "sync") return ValidationMode::Sync;
     throw std::invalid_argument(
-        std::format("validation must be one of 'auto', 'on', 'off' (got '{}')", value));
+        std::format("validation must be one of 'auto', 'on', 'off', 'sync' (got '{}')", value));
 }
 
 // A Context built without a logger used to render with validation off and say
@@ -508,6 +509,15 @@ PYBIND11_MODULE(_core, m) {
         .value("LINE_LIST", Topology::LINE_LIST)
         .export_values();
 
+    // The vocabulary of cmd.barrier() in manual mode (auto_barriers=False).
+    py::enum_<Access>(m, "Access")
+        .value("SHADER_READ", Access::SHADER_READ)
+        .value("SHADER_WRITE", Access::SHADER_WRITE)
+        .value("VERTEX_READ", Access::VERTEX_READ)
+        .value("INDEX_READ", Access::INDEX_READ)
+        .value("UNIFORM_READ", Access::UNIFORM_READ)
+        .export_values();
+
     // Pixel formats — the name VertexFormat freed in 0.4.
     py::enum_<Format>(m, "Format")
         .value("RGBA8", Format::RGBA8)
@@ -763,6 +773,11 @@ PYBIND11_MODULE(_core, m) {
             self->dispatch(group_count_x, group_count_y, group_count_z);
             return self;
         }, py::arg("group_count_x"), py::arg("group_count_y") = 1, py::arg("group_count_z") = 1)
+        .def("barrier", [](std::shared_ptr<CommandBuffer> self, std::shared_ptr<Buffer> buffer,
+                           Access src, Access dst) {
+            unwrap(self->barrier(std::move(buffer), src, dst), nullptr);
+            return self;
+        }, py::arg("buffer"), py::arg("src"), py::arg("dst"))
         // No stage argument: the Pipeline already records which stages its push
         // constant range covers, so repeating it could only ever be wrong.
         .def("push_constants", [](std::shared_ptr<CommandBuffer> self, std::shared_ptr<Pipeline> pipeline,
@@ -830,7 +845,8 @@ PYBIND11_MODULE(_core, m) {
         .def(py::init([](std::shared_ptr<Logger> logger, const std::string& validation,
                          std::vector<Feature> features, std::vector<Feature> optional,
                          std::uint32_t frames_in_flight,
-                         std::vector<std::string> raw_extensions) {
+                         std::vector<std::string> raw_extensions,
+                         bool auto_barriers) {
             // An argument-validity error, so ValueError — matching what
             // validation="nonsense" raises, not the BazaltError hierarchy.
             if (frames_in_flight < 1 || frames_in_flight > 4) {
@@ -844,6 +860,7 @@ PYBIND11_MODULE(_core, m) {
             config.optional = std::move(optional);
             config.frames_in_flight = frames_in_flight;
             config.raw_extensions = std::move(raw_extensions);
+            config.auto_barriers = auto_barriers;
 
             if (!logger) {
                 logger = make_default_logger();
@@ -858,7 +875,9 @@ PYBIND11_MODULE(_core, m) {
             py::arg("features") = std::vector<Feature>{},
             py::arg("optional") = std::vector<Feature>{},
             py::arg("frames_in_flight") = 2,
-            py::arg("raw_extensions") = std::vector<std::string>{})
+            py::arg("raw_extensions") = std::vector<std::string>{},
+            py::arg("auto_barriers") = true)
+        .def_property_readonly("auto_barriers", &Context::auto_barriers)
         .def_property_readonly("frames_in_flight", &Context::frames_in_flight)
         .def_property_readonly("logger", &Context::logger)
         .def("supports", &Context::supports, py::arg("feature"))
@@ -995,9 +1014,9 @@ PYBIND11_MODULE(_core, m) {
         }, py::arg("max_sets"), py::arg("samplers") = 0, py::arg("uniform_buffers") = 0, py::arg("storage_buffers") = 0)
         // Command buffers come from the Context, not a renderer: they are a device
         // resource, and a headless Context has no renderer to ask.
-        .def("create_command_buffer", [](Context& self) -> py::object {
-            return py::cast(unwrap(CommandBuffer::create(self), self.logger().get()));
-        })
+        .def("create_command_buffer", [](Context& self, std::optional<bool> auto_barriers) -> py::object {
+            return py::cast(unwrap(CommandBuffer::create(self, auto_barriers), self.logger().get()));
+        }, py::arg("auto_barriers") = py::none())
         // The headless counterpart of frame.submit(): no swapchain, no present.
         .def("submit", [](Context& self, std::shared_ptr<CommandBuffer> cmd) {
             // Blocking (wait-idle inside) — release the GIL for the duration.

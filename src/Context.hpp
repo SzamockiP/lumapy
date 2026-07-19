@@ -25,11 +25,16 @@
 //
 // Auto is the default and never fails: end-user machines generally have no
 // layers installed, and a missing layer is not a reason to refuse to render.
+//
+// Sync is On plus synchronization validation. Core validation is blind to
+// missing barriers; this feature is what makes "the manual-barrier mode is
+// really manual" testable at all. Costly — a debugging mode, not a default.
 enum class ValidationMode
 {
 	Off,
 	Auto,
 	On,
+	Sync,
 };
 
 // The async upload machinery, seen from the Context's side. A tiny virtual
@@ -55,6 +60,13 @@ struct ContextConfig
 	// How many frames may be recorded ahead of the GPU. 2 is the classic
 	// latency/throughput trade-off; 1 is legal and useful for debugging.
 	std::uint32_t frames_in_flight = 2;
+
+	// Barriers between resources (SSBO -> vertex read, dispatch -> dispatch)
+	// are computed automatically at record time. False means every one of them
+	// is the caller's job via cmd.barrier(). Attachment layout transitions in
+	// begin/end_rendering are NOT covered by this switch — they are the
+	// RenderTarget contract and stay automatic always.
+	bool auto_barriers = true;
 
 	// Escape hatch, documented as "you shouldn't need this". Present so that the
 	// capability abstraction never becomes a ceiling.
@@ -93,6 +105,7 @@ public:
 
 		auto context = std::shared_ptr<Context>(new Context(logger));
 		context->frames_in_flight_ = config.frames_in_flight;
+		context->auto_barriers_ = config.auto_barriers;
 
 		auto target_api = create_instance_(*context, config, logger);
 		if (!target_api)
@@ -236,6 +249,7 @@ public:
 	// deletion queue and upload bookkeeping need "how far has the GPU
 	// progressed", which a modulo index cannot answer.
 	std::uint32_t frames_in_flight() const { return frames_in_flight_; }
+	bool auto_barriers() const { return auto_barriers_; }
 	std::uint64_t frame_serial() const { return frame_serial_; }
 	std::uint32_t frame_index() const
 	{
@@ -442,7 +456,7 @@ private:
 		// with the layers off and stayed silent about its own bugs.
 		if (config.validation != ValidationMode::Off)
 		{
-			if (config.validation == ValidationMode::On)
+			if (config.validation == ValidationMode::On || config.validation == ValidationMode::Sync)
 			{
 				inst_builder.enable_validation_layers();
 			}
@@ -450,6 +464,23 @@ private:
 			{
 				// Enables the layers only if they are actually present.
 				inst_builder.request_validation_layers();
+			}
+
+			if (config.validation == ValidationMode::Sync)
+			{
+				inst_builder.add_validation_feature_enable(
+					VK_VALIDATION_FEATURE_ENABLE_SYNCHRONIZATION_VALIDATION_EXT);
+				// Verified empirically on SDK 1.4.350: without this setting the
+				// layer does not track shader descriptor accesses at all, so a
+				// missing barrier between two dispatches goes UNREPORTED — which
+				// would make the whole Sync mode a placebo.
+				static const VkBool32 syncval_shader_accesses = VK_TRUE;
+				inst_builder.add_layer_setting(VkLayerSettingEXT{
+					.pLayerName = "VK_LAYER_KHRONOS_validation",
+					.pSettingName = "syncval_shader_accesses_heuristic",
+					.type = VK_LAYER_SETTING_TYPE_BOOL32_EXT,
+					.valueCount = 1,
+					.pValues = &syncval_shader_accesses });
 			}
 
 			inst_builder
@@ -843,6 +874,7 @@ private:
 	std::uint32_t negotiated_api_version_ = VK_API_VERSION_1_2;
 
 	std::uint32_t frames_in_flight_ = 2;
+	bool auto_barriers_ = true;
 	std::uint64_t frame_serial_ = 0;
 
 	VkSemaphore submit_timeline_ = VK_NULL_HANDLE;

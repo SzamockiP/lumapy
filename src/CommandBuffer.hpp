@@ -1,6 +1,8 @@
 ﻿#pragma once
 #include <volk.h>
 #include <memory>
+#include <optional>
+#include <unordered_map>
 #include <vector>
 #include <array>
 #include <expected>
@@ -10,6 +12,7 @@
 #include "Pipeline.hpp"
 #include "Buffer.hpp"
 #include "DescriptorSet.hpp"
+#include "ResourceTracker.hpp"
 
 // Records commands once and replays them every submit.
 //
@@ -22,9 +25,13 @@ public:
     // Takes a Context, not a renderer: command buffers are a device resource and
     // have nothing to do with presentation. This is what lets a headless Context
     // with no renderer at all record commands.
-    static std::expected<std::shared_ptr<CommandBuffer>, Error> create(Context& context) {
+    static std::expected<std::shared_ptr<CommandBuffer>, Error> create(
+        Context& context, std::optional<bool> auto_barriers = std::nullopt) {
         auto ctx = context.shared_from_this();
         auto cmd = std::shared_ptr<CommandBuffer>(new CommandBuffer(ctx));
+        // Per-command-buffer override of the Context-wide mode, so one hot
+        // path can go manual without flipping the whole application.
+        cmd->auto_barriers_ = auto_barriers.value_or(ctx->auto_barriers());
         cmd->command_buffers_.resize(ctx->frames_in_flight(), VK_NULL_HANDLE);
 
         VkCommandBufferAllocateInfo allocInfo{
@@ -63,6 +70,14 @@ public:
     CommandBuffer& begin() {
         commands_.clear();
         used_sets_.clear();
+        // A reused command buffer must forget its previous recording entirely,
+        // or it would emit barriers against uses that no longer exist.
+        tracker_.reset();
+        bound_graphics_sets_.clear();
+        bound_compute_sets_.clear();
+        tracked_writes_ = false;
+        in_rendering_ = false;
+        rendering_insert_pos_ = 0;
         return *this;
     }
 
@@ -202,6 +217,11 @@ public:
             VkRect2D scissor{ .offset = {0, 0}, .extent = rt->extent() };
             vkCmdSetScissor(cmd, 0, 1, &scissor);
         });
+        // vkCmdPipelineBarrier is illegal inside a dynamic rendering scope, so
+        // auto barriers discovered between begin and end are hoisted to just
+        // before this lambda (record_barrier_ reads these two fields).
+        in_rendering_ = true;
+        rendering_insert_pos_ = commands_.size() - 1;
         return *this;
     }
 
@@ -276,6 +296,7 @@ public:
             // recorded-but-never-submitted command buffer marks nothing.
             target->on_rendering_recorded();
         });
+        in_rendering_ = false;
         return *this;
     }
 
@@ -308,6 +329,9 @@ public:
     }
 
     CommandBuffer& bind_vertex_buffer(std::shared_ptr<Buffer> buffer) {
+        // The read truly happens at draw, but a barrier placed before the bind
+        // is still before the draw — sound, and simpler than deferring it.
+        track_use_(buffer, VK_PIPELINE_STAGE_VERTEX_INPUT_BIT, VK_ACCESS_VERTEX_ATTRIBUTE_READ_BIT, false);
         commands_.push_back([buffer](VkCommandBuffer cmd, const FrameContext&) {
             VkBuffer vertexBuffers[] = {buffer->get()};
             VkDeviceSize offsets[] = {0};
@@ -317,6 +341,7 @@ public:
     }
 
     CommandBuffer& bind_index_buffer(std::shared_ptr<Buffer> buffer) {
+        track_use_(buffer, VK_PIPELINE_STAGE_VERTEX_INPUT_BIT, VK_ACCESS_INDEX_READ_BIT, false);
         commands_.push_back([buffer](VkCommandBuffer cmd, const FrameContext&) {
             // Derived from the buffer rather than hardcoded to UINT32: create_buffer
             // accepts UINT16 indices, which used to be read back at half count.
@@ -326,6 +351,7 @@ public:
     }
 
     CommandBuffer& draw(uint32_t vertexCount) {
+        track_draw_();
         commands_.push_back([vertexCount](VkCommandBuffer cmd, const FrameContext&) {
             vkCmdDraw(cmd, vertexCount, 1, 0, 0);
         });
@@ -333,6 +359,7 @@ public:
     }
 
     CommandBuffer& draw_indexed(uint32_t indexCount, uint32_t firstIndex = 0, int32_t vertexOffset = 0) {
+        track_draw_();
         commands_.push_back([indexCount, firstIndex, vertexOffset](VkCommandBuffer cmd, const FrameContext&) {
             vkCmdDrawIndexed(cmd, indexCount, 1, firstIndex, vertexOffset, 0);
         });
@@ -340,6 +367,7 @@ public:
     }
 
     CommandBuffer& draw_indexed_instanced(uint32_t indexCount, uint32_t instanceCount, uint32_t firstIndex = 0, int32_t vertexOffset = 0) {
+        track_draw_();
         commands_.push_back([indexCount, instanceCount, firstIndex, vertexOffset](VkCommandBuffer cmd, const FrameContext&) {
             vkCmdDrawIndexed(cmd, indexCount, instanceCount, firstIndex, vertexOffset, 0);
         });
@@ -347,10 +375,30 @@ public:
     }
 
     CommandBuffer& dispatch(uint32_t groupCountX, uint32_t groupCountY = 1, uint32_t groupCountZ = 1) {
+        track_dispatch_();
         commands_.push_back([groupCountX, groupCountY, groupCountZ](VkCommandBuffer cmd, const FrameContext&) {
             vkCmdDispatch(cmd, groupCountX, groupCountY, groupCountZ);
         });
         return *this;
+    }
+
+    // Manual-mode barrier (also legal, if redundant, in auto mode). Refused
+    // inside a rendering scope: vkCmdPipelineBarrier is invalid there, and in
+    // manual mode nothing is hoisted by magic — that would be a second,
+    // implicit way of doing the explicit thing.
+    std::expected<void, Error> barrier(std::shared_ptr<Buffer> buffer, Access src, Access dst) {
+        if (!buffer) {
+            return std::unexpected(err_resource("barrier: buffer is null"));
+        }
+        if (in_rendering_) {
+            return std::unexpected(err_resource(
+                "cmd.barrier() is not allowed inside a rendering scope; "
+                "record it before begin_rendering"));
+        }
+        const StageAccess s = to_vk(src);
+        const StageAccess d = to_vk(dst);
+        record_barrier_(std::move(buffer), { s.stages, d.stages, s.access, d.access });
+        return {};
     }
 
     // No stage argument: the Pipeline already knows which stages its push constant
@@ -372,6 +420,13 @@ public:
         // per-command-buffer question, not a global one, or a loading screen
         // would serialize behind its own cargo.
         used_sets_.push_back(descSet);
+        // Record-time bookkeeping for the tracker: the next dispatch/draw walks
+        // the sets bound at its bind point. Rebinding an index replaces it.
+        if (pipeline->bind_point() == VK_PIPELINE_BIND_POINT_COMPUTE) {
+            bound_compute_sets_[setIndex] = descSet;
+        } else {
+            bound_graphics_sets_[setIndex] = descSet;
+        }
         commands_.push_back([descSet, pipeline, setIndex](VkCommandBuffer cmd, const FrameContext& frame) {
             VkDescriptorSet set = descSet->get(frame.frame_index);
             vkCmdBindDescriptorSets(cmd, pipeline->bind_point(),
@@ -389,6 +444,24 @@ public:
     }
 
     void execute(VkCommandBuffer vkCmd, const FrameContext& frame) {
+        // Replay wrap-around. In-recording barriers order uses within one
+        // replay, but the same recording ran last frame and may still be in
+        // flight — its trailing reads/writes race with this replay's first
+        // write. One conservative memory barrier at the top covers that.
+        // Emitted only when the recording writes a tracked buffer at all:
+        // read-only recordings race with nothing.
+        if (auto_barriers_ && tracked_writes_) {
+            VkMemoryBarrier barrier{
+                .sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER,
+                .pNext = nullptr,
+                .srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT,
+                .dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT |
+                                 VK_ACCESS_UNIFORM_READ_BIT | VK_ACCESS_VERTEX_ATTRIBUTE_READ_BIT |
+                                 VK_ACCESS_INDEX_READ_BIT
+            };
+            constexpr VkPipelineStageFlags stages = kAllShaderStages | VK_PIPELINE_STAGE_VERTEX_INPUT_BIT;
+            vkCmdPipelineBarrier(vkCmd, stages, stages, 0, 1, &barrier, 0, nullptr, 0, nullptr);
+        }
         for (auto& cmd_func : commands_) {
             cmd_func(vkCmd, frame);
         }
@@ -397,8 +470,101 @@ public:
 private:
     CommandBuffer(std::shared_ptr<Context> context) : context_(context) {}
 
+    // Records a buffer-barrier lambda. Inside a rendering scope it is hoisted
+    // to just before the begin_rendering lambda (vkCmdPipelineBarrier is
+    // illegal inside dynamic rendering); deferred recording makes the insert
+    // a cheap vector operation on data that only exists at record time.
+    void record_barrier_(std::shared_ptr<Buffer> buffer, ResourceTracker::Barrier b) {
+        auto lambda = [buffer = std::move(buffer), b](VkCommandBuffer cmd, const FrameContext&) {
+            VkBufferMemoryBarrier barrier{
+                .sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER,
+                .pNext = nullptr,
+                .srcAccessMask = b.src_access,
+                .dstAccessMask = b.dst_access,
+                .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+                .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+                // Resolved at execute time, never captured: a DynamicBuffer
+                // has one handle per frame in flight.
+                .buffer = buffer->get(),
+                .offset = 0,
+                .size = VK_WHOLE_SIZE
+            };
+            vkCmdPipelineBarrier(cmd, b.src_stages, b.dst_stages, 0, 0, nullptr, 1, &barrier, 0, nullptr);
+        };
+        if (in_rendering_) {
+            commands_.insert(commands_.begin() + rendering_insert_pos_, std::move(lambda));
+            ++rendering_insert_pos_;
+        } else {
+            commands_.push_back(std::move(lambda));
+        }
+    }
+
+    void track_use_(const std::shared_ptr<Buffer>& buffer, VkPipelineStageFlags stages,
+                    VkAccessFlags access, bool writes) {
+        if (!auto_barriers_) {
+            return;
+        }
+        if (writes) {
+            tracked_writes_ = true;
+        }
+        if (auto b = tracker_.use(buffer.get(), stages, access, writes)) {
+            record_barrier_(buffer, *b);
+        }
+    }
+
+    // Storage buffers in graphics shaders are conservatively READS. Writes are
+    // invisible without shader reflection — the documented limit of auto mode;
+    // cmd.barrier() covers that case by hand.
+    void track_draw_() {
+        if (!auto_barriers_) {
+            return;
+        }
+        for (auto& [idx, set] : bound_graphics_sets_) {
+            for (const auto& bb : set->buffers()) {
+                if (bb.type == VK_DESCRIPTOR_TYPE_STORAGE_BUFFER) {
+                    track_use_(bb.buffer,
+                               VK_PIPELINE_STAGE_VERTEX_SHADER_BIT | VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+                               VK_ACCESS_SHADER_READ_BIT, false);
+                } else if (bb.type == VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER) {
+                    track_use_(bb.buffer,
+                               VK_PIPELINE_STAGE_VERTEX_SHADER_BIT | VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+                               VK_ACCESS_UNIFORM_READ_BIT, false);
+                }
+            }
+        }
+    }
+
+    // Compute SSBOs are conservatively READ+WRITE: without reflection there is
+    // no telling a `readonly buffer` from a mutated one, and the pessimism
+    // costs one barrier, not correctness.
+    void track_dispatch_() {
+        if (!auto_barriers_) {
+            return;
+        }
+        for (auto& [idx, set] : bound_compute_sets_) {
+            for (const auto& bb : set->buffers()) {
+                if (bb.type == VK_DESCRIPTOR_TYPE_STORAGE_BUFFER) {
+                    track_use_(bb.buffer, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                               VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT, true);
+                } else if (bb.type == VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER) {
+                    track_use_(bb.buffer, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                               VK_ACCESS_UNIFORM_READ_BIT, false);
+                }
+            }
+        }
+    }
+
     std::shared_ptr<Context> context_;
     std::vector<VkCommandBuffer> command_buffers_;
     std::vector<std::function<void(VkCommandBuffer, const FrameContext&)>> commands_;
     std::vector<std::shared_ptr<DescriptorSet>> used_sets_;
+
+    // ── record-time state (reset by begin(), never touched at execute) ──
+    bool auto_barriers_ = true;
+    ResourceTracker tracker_;
+    bool tracked_writes_ = false;
+    bool in_rendering_ = false;
+    std::size_t rendering_insert_pos_ = 0;
+    std::unordered_map<uint32_t, std::shared_ptr<DescriptorSet>> bound_graphics_sets_;
+    std::unordered_map<uint32_t, std::shared_ptr<DescriptorSet>> bound_compute_sets_;
 };
