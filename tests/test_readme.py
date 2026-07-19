@@ -14,7 +14,7 @@ from conftest import SHADER_DIR
 
 def test_readme_headless_quickstart(ctx):
     """Kept in step with the 'Rendering Without a Window' section of README.md."""
-    target = bz.RenderTarget(ctx, 800, 600, depth=True)
+    target = bz.RenderTarget(ctx, 800, 600, depth=bz.Format.D32F)
 
     pipeline = (ctx.pipeline_builder()
                 .vertex_shader(ctx.compile_shader(str(SHADER_DIR / "triangle.vert"),
@@ -32,11 +32,8 @@ def test_readme_headless_quickstart(ctx):
 
     cmd = ctx.create_command_buffer()
     cmd.begin()
-    cmd.begin_rendering(target, clear_color=[0.1, 0.2, 0.3, 1.0])
-    cmd.bind_pipeline(pipeline)
-    cmd.bind_vertex_buffer(vbuf)
-    cmd.draw(3)
-    cmd.end_rendering(target)
+    with cmd.rendering(target, clear_color=[0.1, 0.2, 0.3, 1.0]) as c:
+        c.bind_pipeline(pipeline).bind_vertex_buffer(vbuf).draw(3)
 
     ctx.submit(cmd)
 

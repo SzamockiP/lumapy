@@ -23,7 +23,10 @@
 #include "ShaderCompiler.hpp"
 #include "Pipeline.hpp"
 #include "CommandBuffer.hpp"
-#include "Texture.hpp"
+#include "Format.hpp"
+#include "Image.hpp"
+#include "Sampler.hpp"
+#include "UploadManager.hpp"
 #include "DescriptorSet.hpp"
 
 namespace py = pybind11;
@@ -290,40 +293,144 @@ VkCommandBuffer record_frame(CommandBuffer& cmd, std::uint32_t frame_index)
 }
 
 }  // namespace
-void SwapchainRenderer::submit(std::shared_ptr<CommandBuffer> cmd) {
-    end_frame(record_frame(*cmd, current_frame()));
+void SwapchainRenderer::submit(std::shared_ptr<CommandBuffer> cmd, std::uint64_t upload_wait_serial) {
+    end_frame(record_frame(*cmd, current_frame()), upload_wait_serial);
+}
+
+// Upload residency, per command buffer: every image this recording references
+// must at least be *submitted* (CPU-wait while the worker is still decoding —
+// correctness first), and the frame's GPU work then waits on the submission
+// timeline for the highest upload it depends on (zero CPU stall in the steady
+// state). Images with no pending upload — RTT attachments, synchronous
+// uploads — short-circuit to 0.
+std::uint64_t require_uploads_resident(CommandBuffer& cmd) {
+    std::uint64_t wait_serial = 0;
+    for (const auto& set : cmd.used_sets()) {
+        for (const auto& image : set->images()) {
+            auto serial = image->require_resident();
+            if (!serial) {
+                raise_error(serial.error());
+            }
+            wait_serial = (std::max)(wait_serial, *serial);
+        }
+    }
+    return wait_serial;
+}
+
+std::expected<void, Error> Frame::submit(std::shared_ptr<CommandBuffer> cmd) {
+    if (submitted) {
+        return std::unexpected(err_resource(
+            "This Frame was already submitted. Call begin_frame() again to get the next one."));
+    }
+    if (serial != renderer->current_serial()) {
+        return std::unexpected(err_resource(
+            "This Frame is stale: begin_frame() has run again since it was acquired. "
+            "Acquire, submit and drop a Frame within one tick."));
+    }
+    const std::uint64_t upload_wait_serial = require_uploads_resident(*cmd);
+    renderer->submit(std::move(cmd), upload_wait_serial);
+    submitted = true;
+    return {};
+}
+
+// The state behind `with cmd.rendering(target, ...):` — carries what
+// __enter__/__exit__ need to record the begin/end pair. Deliberately a plain
+// struct bound only for its dunder methods; begin_rendering/end_rendering
+// stay public, this is sugar, not a replacement.
+struct RenderingScope {
+    std::shared_ptr<CommandBuffer> cmd;
+    std::shared_ptr<RenderTarget> target;
+    std::vector<float> clear_color;
+};
+
+// Readback shaped for numpy: (h, w, channels) — or (h, w) for single-channel
+// formats — with the dtype the format table dictates. Shared by Image.read and
+// RenderTarget.read_pixels.
+py::array image_to_numpy(Image& image) {
+    auto bytes = unwrap(image.read(), nullptr);
+    const FormatInfo info = format_info(image.format());
+
+    std::vector<py::ssize_t> shape;
+    if (info.channels == 1) {
+        shape = { static_cast<py::ssize_t>(image.height()),
+                  static_cast<py::ssize_t>(image.width()) };
+    } else {
+        shape = { static_cast<py::ssize_t>(image.height()),
+                  static_cast<py::ssize_t>(image.width()),
+                  static_cast<py::ssize_t>(info.channels) };
+    }
+
+    py::array out(py::dtype(info.numpy_dtype), shape);
+    std::memcpy(out.mutable_data(), bytes.data(), bytes.size());
+    return out;
 }
 
 void context_submit(Context& context, std::shared_ptr<CommandBuffer> cmd) {
-    VkCommandBuffer vkCmd = record_frame(*cmd, context.current_frame());
+    const std::uint64_t upload_wait_serial = require_uploads_resident(*cmd);
+    VkCommandBuffer vkCmd = record_frame(*cmd, context.frame_index());
 
-    VkSubmitInfo submitInfo{
-        .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO,
-        .pNext = nullptr,
-        .waitSemaphoreCount = 0,
-        .pWaitSemaphores = nullptr,
-        .pWaitDstStageMask = nullptr,
-        .commandBufferCount = 1,
-        .pCommandBuffers = &vkCmd,
-        .signalSemaphoreCount = 0,
-        .pSignalSemaphores = nullptr
-    };
+    VkSemaphore timeline = context.submit_timeline();
+    VkPipelineStageFlags waitStage = VK_PIPELINE_STAGE_ALL_COMMANDS_BIT;
 
-    if (auto e = check(vkQueueSubmit(context.graphics_queue(), 1, &submitInfo, VK_NULL_HANDLE),
-                       "submit command buffer")) {
-        raise_error(*e);
+    {
+        std::lock_guard lock(context.queue_mutex());
+        const std::uint64_t serial = context.advance_submit_serial();
+
+        VkTimelineSemaphoreSubmitInfo timelineInfo{
+            .sType = VK_STRUCTURE_TYPE_TIMELINE_SEMAPHORE_SUBMIT_INFO,
+            .pNext = nullptr,
+            .waitSemaphoreValueCount = 1,
+            .pWaitSemaphoreValues = &upload_wait_serial,
+            .signalSemaphoreValueCount = 1,
+            .pSignalSemaphoreValues = &serial
+        };
+        VkSubmitInfo submitInfo{
+            .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO,
+            .pNext = &timelineInfo,
+            // A timeline wait for value 0 is trivially satisfied, so this
+            // needs no branching on whether uploads are pending.
+            .waitSemaphoreCount = 1,
+            .pWaitSemaphores = &timeline,
+            .pWaitDstStageMask = &waitStage,
+            .commandBufferCount = 1,
+            .pCommandBuffers = &vkCmd,
+            .signalSemaphoreCount = 1,
+            .pSignalSemaphores = &timeline
+        };
+
+        if (auto e = check(vkQueueSubmit(context.graphics_queue(), 1, &submitInfo, VK_NULL_HANDLE),
+                           "submit command buffer")) {
+            raise_error(*e);
+        }
+
+        // Blocking. There is no swapchain to pace against here; the timeline
+        // exists for uploads and deferred destruction, not (yet) for making
+        // headless submits asynchronous.
+        if (auto e = check(vkQueueWaitIdle(context.graphics_queue()), "wait for submitted command buffer")) {
+            raise_error(*e);
+        }
     }
 
-    // Blocking. There is no swapchain to pace against here, and 0.5's timeline
-    // semaphores are what make this asynchronous.
-    if (auto e = check(vkQueueWaitIdle(context.graphics_queue()), "wait for submitted command buffer")) {
-        raise_error(*e);
-    }
+    // The wait-idle above proves everything through the current serial is done.
+    context.flush_deletion_queue();
+
+    // A headless submit is a frame too: advance the ring so DynamicBuffer
+    // slots and frame descriptor sets rotate (this path used to sit on slot 0
+    // forever). After, not before, submitting — an update() made before this
+    // call must land in the slot this submit reads.
+    context.advance_frame();
 }
 
 
 PYBIND11_MODULE(_core, m) {
     m.doc() = "Bazalt native core module";
+
+    // Logger drain threads call into Python; joining them after the
+    // interpreter starts finalizing crashes ("could not acquire lock for
+    // stderr at interpreter shutdown"). atexit runs while Python is intact,
+    // so every script that ends with a live Context exits cleanly.
+    py::module_::import("atexit").attr("register")(
+        py::cpp_function([]() { Logger::shutdown_all(); }));
 
     register_exceptions(m);
 
@@ -394,6 +501,28 @@ PYBIND11_MODULE(_core, m) {
         .value("FLOAT4", VertexFormat::FLOAT4)
         .export_values();
 
+    // Pixel formats — the name VertexFormat freed in 0.4.
+    py::enum_<Format>(m, "Format")
+        .value("RGBA8", Format::RGBA8)
+        .value("RGBA8_SRGB", Format::RGBA8_SRGB)
+        .value("BGRA8", Format::BGRA8)
+        .value("R8", Format::R8)
+        .value("RG8", Format::RG8)
+        .value("R16F", Format::R16F)
+        .value("RGBA16F", Format::RGBA16F)
+        .value("R32F", Format::R32F)
+        .value("RGBA32F", Format::RGBA32F)
+        .value("D32F", Format::D32F);
+
+    py::enum_<Filter>(m, "Filter")
+        .value("LINEAR", Filter::LINEAR)
+        .value("NEAREST", Filter::NEAREST);
+
+    py::enum_<AddressMode>(m, "AddressMode")
+        .value("REPEAT", AddressMode::REPEAT)
+        .value("CLAMP", AddressMode::CLAMP)
+        .value("MIRROR", AddressMode::MIRROR);
+
     py::enum_<CullMode>(m, "CullMode")
         .value("NONE", CullMode::NONE)
         .value("BACK", CullMode::BACK)
@@ -430,13 +559,47 @@ PYBIND11_MODULE(_core, m) {
             with_list_bytes(list, actualType, [&](const void* data, size_t nbytes) {
                 unwrap(buffer.update({static_cast<const std::byte*>(data), nbytes}), nullptr);
             });
-        }, py::arg("list"), py::arg("data_type") = py::none());
+        }, py::arg("list"), py::arg("data_type") = py::none())
+        // dtype is mandatory: buffers carry no format (unlike Images), so the
+        // caller has to say how to interpret the bytes.
+        .def("read", [](Buffer& self, py::object dtype) -> py::array {
+            auto bytes = unwrap(self.read_bytes(), nullptr);
+            const py::dtype dt = py::dtype::from_args(dtype);
+            const auto itemsize = static_cast<size_t>(dt.itemsize());
+            if (itemsize == 0 || bytes.size() % itemsize != 0) {
+                raise_error(err_resource(std::format(
+                    "Buffer.read: buffer size {} is not a multiple of the dtype's "
+                    "item size {}", bytes.size(), itemsize)));
+            }
+            py::array out(dt, static_cast<py::ssize_t>(bytes.size() / itemsize));
+            std::memcpy(out.mutable_data(), bytes.data(), bytes.size());
+            return out;
+        }, py::arg("dtype"));
     
     py::class_<ShaderModule, std::shared_ptr<ShaderModule>>(m, "ShaderModule");
 
-    py::class_<Texture, std::shared_ptr<Texture>>(m, "Texture")
-        .def_property_readonly("width", &Texture::width)
-        .def_property_readonly("height", &Texture::height);
+    // Image + Sampler replace the old Texture, which fused VkImage, view and a
+    // per-texture sampler into one object. Samplers are cached on the Context;
+    // an Image is just the pixels.
+    py::class_<Image, std::shared_ptr<Image>>(m, "Image")
+        .def_property_readonly("width", &Image::width)
+        .def_property_readonly("height", &Image::height)
+        .def_property_readonly("format", &Image::format)
+        .def_property_readonly("mip_levels", &Image::mip_levels)
+        .def_property_readonly("ready", &Image::ready)
+        .def("wait", [](Image& self) {
+            std::expected<void, Error> r;
+            {
+                py::gil_scoped_release release;
+                r = self.wait();
+            }
+            unwrap(std::move(r), nullptr);
+        })
+        .def("read", [](Image& self) -> py::array {
+            return image_to_numpy(self);
+        });
+
+    py::class_<Sampler, std::shared_ptr<Sampler>>(m, "Sampler");
 
     py::class_<Pipeline, std::shared_ptr<Pipeline>>(m, "Pipeline");
 
@@ -482,9 +645,10 @@ PYBIND11_MODULE(_core, m) {
         }, py::arg("target"));
 
     py::class_<DescriptorSet, std::shared_ptr<DescriptorSet>>(m, "DescriptorSet")
-        .def("set_texture", [](DescriptorSet& self, uint32_t binding, std::shared_ptr<Texture> texture) {
-            unwrap(self.set_texture(binding, std::move(texture)), nullptr);
-        }, py::arg("binding"), py::arg("texture"))
+        .def("set_image", [](DescriptorSet& self, uint32_t binding, std::shared_ptr<Image> image,
+                             std::shared_ptr<Sampler> sampler) {
+            unwrap(self.set_image(binding, std::move(image), std::move(sampler)), nullptr);
+        }, py::arg("binding"), py::arg("image"), py::arg("sampler") = py::none())
         .def("set_buffer", [](DescriptorSet& self, uint32_t binding, std::shared_ptr<Buffer> buffer) {
             unwrap(self.set_buffer(binding, std::move(buffer)), nullptr);
         }, py::arg("binding"), py::arg("buffer"));
@@ -497,35 +661,95 @@ PYBIND11_MODULE(_core, m) {
             return py::cast(unwrap(pool.allocate_frame_descriptor_set(pipeline, setIndex), pool.logger().get()));
         }, py::arg("pipeline"), py::arg("set"));
 
+    // Every recording method returns the command buffer itself, so the two
+    // spellings are the same API:
+    //     cmd.begin_rendering(t).bind_pipeline(p).draw(3)
+    // and the statement-per-line style both work. The lambdas return the
+    // shared_ptr self (not the C++ reference) so pybind hands back the SAME
+    // Python object — `cmd.draw(3) is cmd`.
     py::class_<CommandBuffer, std::shared_ptr<CommandBuffer>>(m, "CommandBuffer")
-        .def("begin", &CommandBuffer::begin)
+        .def("begin", [](std::shared_ptr<CommandBuffer> self) {
+            self->begin();
+            return self;
+        })
         // The target is required. begin_rendering() silently meaning "the
         // swapchain" made presentation a special case disguised as the default.
-        .def("begin_rendering", &CommandBuffer::begin_rendering,
-             py::arg("target"), py::arg("clear_color") = std::vector<float>{0.0f, 0.0f, 0.0f, 1.0f})
-        .def("end_rendering", &CommandBuffer::end_rendering, py::arg("target"))
+        .def("begin_rendering", [](std::shared_ptr<CommandBuffer> self, std::shared_ptr<RenderTarget> target,
+                                   const std::vector<float>& clear_color) {
+            self->begin_rendering(std::move(target), clear_color);
+            return self;
+        }, py::arg("target"), py::arg("clear_color") = std::vector<float>{0.0f, 0.0f, 0.0f, 1.0f})
+        .def("end_rendering", [](std::shared_ptr<CommandBuffer> self, std::shared_ptr<RenderTarget> target) {
+            self->end_rendering(std::move(target));
+            return self;
+        }, py::arg("target"))
+        // With-statement sugar over the same pair: __enter__ records
+        // begin_rendering and hands back the cmd, __exit__ records
+        // end_rendering unconditionally — the pair cannot be left open.
+        .def("rendering", [](std::shared_ptr<CommandBuffer> self, std::shared_ptr<RenderTarget> target,
+                             const std::vector<float>& clear_color) {
+            return RenderingScope{ std::move(self), std::move(target), clear_color };
+        }, py::arg("target"), py::arg("clear_color") = std::vector<float>{0.0f, 0.0f, 0.0f, 1.0f})
         // The no-argument versions are gone: begin_rendering emits a full-target
         // viewport and scissor itself. These remain for split-screen and similar.
-        .def("set_viewport", &CommandBuffer::set_viewport,
-             py::arg("x"), py::arg("y"), py::arg("width"), py::arg("height"))
-        .def("set_scissor", &CommandBuffer::set_scissor,
-             py::arg("x"), py::arg("y"), py::arg("width"), py::arg("height"))
-        .def("bind_pipeline", &CommandBuffer::bind_pipeline, py::arg("pipeline"))
-        .def("bind_vertex_buffer", &CommandBuffer::bind_vertex_buffer, py::arg("buffer"))
-        .def("bind_index_buffer", &CommandBuffer::bind_index_buffer, py::arg("buffer"))
-        .def("draw", &CommandBuffer::draw, py::arg("vertex_count"))
-        .def("draw_indexed", &CommandBuffer::draw_indexed,
-             py::arg("index_count"), py::arg("first_index") = 0, py::arg("vertex_offset") = 0)
-        .def("draw_indexed_instanced", &CommandBuffer::draw_indexed_instanced,
-             py::arg("index_count"), py::arg("instance_count"),
-             py::arg("first_index") = 0, py::arg("vertex_offset") = 0)
+        .def("set_viewport", [](std::shared_ptr<CommandBuffer> self, float x, float y, float width, float height) {
+            self->set_viewport(x, y, width, height);
+            return self;
+        }, py::arg("x"), py::arg("y"), py::arg("width"), py::arg("height"))
+        .def("set_scissor", [](std::shared_ptr<CommandBuffer> self, std::int32_t x, std::int32_t y,
+                               std::uint32_t width, std::uint32_t height) {
+            self->set_scissor(x, y, width, height);
+            return self;
+        }, py::arg("x"), py::arg("y"), py::arg("width"), py::arg("height"))
+        .def("bind_pipeline", [](std::shared_ptr<CommandBuffer> self, std::shared_ptr<Pipeline> pipeline) {
+            self->bind_pipeline(std::move(pipeline));
+            return self;
+        }, py::arg("pipeline"))
+        .def("bind_vertex_buffer", [](std::shared_ptr<CommandBuffer> self, std::shared_ptr<Buffer> buffer) {
+            self->bind_vertex_buffer(std::move(buffer));
+            return self;
+        }, py::arg("buffer"))
+        .def("bind_index_buffer", [](std::shared_ptr<CommandBuffer> self, std::shared_ptr<Buffer> buffer) {
+            self->bind_index_buffer(std::move(buffer));
+            return self;
+        }, py::arg("buffer"))
+        .def("draw", [](std::shared_ptr<CommandBuffer> self, uint32_t vertex_count) {
+            self->draw(vertex_count);
+            return self;
+        }, py::arg("vertex_count"))
+        .def("draw_indexed", [](std::shared_ptr<CommandBuffer> self, uint32_t index_count,
+                                uint32_t first_index, int32_t vertex_offset) {
+            self->draw_indexed(index_count, first_index, vertex_offset);
+            return self;
+        }, py::arg("index_count"), py::arg("first_index") = 0, py::arg("vertex_offset") = 0)
+        .def("draw_indexed_instanced", [](std::shared_ptr<CommandBuffer> self, uint32_t index_count,
+                                          uint32_t instance_count, uint32_t first_index, int32_t vertex_offset) {
+            self->draw_indexed_instanced(index_count, instance_count, first_index, vertex_offset);
+            return self;
+        }, py::arg("index_count"), py::arg("instance_count"),
+           py::arg("first_index") = 0, py::arg("vertex_offset") = 0)
         // No stage argument: the Pipeline already records which stages its push
         // constant range covers, so repeating it could only ever be wrong.
-        .def("push_constants", [](CommandBuffer& cmd, std::shared_ptr<Pipeline> pipeline, uint32_t offset, std::string_view data) {
-            cmd.push_constants(pipeline, offset, static_cast<uint32_t>(data.size()), data.data());
+        .def("push_constants", [](std::shared_ptr<CommandBuffer> self, std::shared_ptr<Pipeline> pipeline,
+                                  uint32_t offset, std::string_view data) {
+            self->push_constants(std::move(pipeline), offset, static_cast<uint32_t>(data.size()), data.data());
+            return self;
         }, py::arg("pipeline"), py::arg("offset"), py::arg("data"))
-        .def("bind_descriptor_set", &CommandBuffer::bind_descriptor_set,
-             py::arg("descriptor_set"), py::arg("pipeline"), py::arg("set"));
+        .def("bind_descriptor_set", [](std::shared_ptr<CommandBuffer> self, std::shared_ptr<DescriptorSet> descriptor_set,
+                                       std::shared_ptr<Pipeline> pipeline, uint32_t set) {
+            self->bind_descriptor_set(std::move(descriptor_set), std::move(pipeline), set);
+            return self;
+        }, py::arg("descriptor_set"), py::arg("pipeline"), py::arg("set"));
+
+    py::class_<RenderingScope>(m, "RenderingScope")
+        .def("__enter__", [](RenderingScope& self) {
+            self.cmd->begin_rendering(self.target, self.clear_color);
+            return self.cmd;
+        })
+        .def("__exit__", [](RenderingScope& self, py::object, py::object, py::object) {
+            self.cmd->end_rendering(self.target);
+            return false;  // never swallow exceptions
+        });
 
     // ── Window (GLFW) ──
     py::class_<Window>(m, "Window")
@@ -570,11 +794,20 @@ PYBIND11_MODULE(_core, m) {
     py::class_<Context, std::shared_ptr<Context>>(m, "Context")
         .def(py::init([](std::shared_ptr<Logger> logger, const std::string& validation,
                          std::vector<Feature> features, std::vector<Feature> optional,
+                         std::uint32_t frames_in_flight,
                          std::vector<std::string> raw_extensions) {
+            // An argument-validity error, so ValueError — matching what
+            // validation="nonsense" raises, not the BazaltError hierarchy.
+            if (frames_in_flight < 1 || frames_in_flight > 4) {
+                throw py::value_error(std::format(
+                    "frames_in_flight must be between 1 and 4, got {}", frames_in_flight));
+            }
+
             ContextConfig config;
             config.validation = parse_validation(validation);
             config.required = std::move(features);
             config.optional = std::move(optional);
+            config.frames_in_flight = frames_in_flight;
             config.raw_extensions = std::move(raw_extensions);
 
             if (!logger) {
@@ -589,7 +822,9 @@ PYBIND11_MODULE(_core, m) {
         }), py::arg("logger") = py::none(), py::arg("validation") = "auto",
             py::arg("features") = std::vector<Feature>{},
             py::arg("optional") = std::vector<Feature>{},
+            py::arg("frames_in_flight") = 2,
             py::arg("raw_extensions") = std::vector<std::string>{})
+        .def_property_readonly("frames_in_flight", &Context::frames_in_flight)
         .def_property_readonly("logger", &Context::logger)
         .def("supports", &Context::supports, py::arg("feature"))
         .def_property_readonly("device_name", &Context::device_name)
@@ -629,9 +864,92 @@ PYBIND11_MODULE(_core, m) {
         .def("compile_shader", [](Context& self, const std::string& path, ShaderStage stage) -> py::object {
             return py::cast(unwrap(ShaderCompiler::compile(self, path, stage), self.logger().get()));
         }, py::arg("path"), py::arg("stage"))
-        .def("load_texture", [](Context& self, const std::string& path) -> py::object {
-            return py::cast(unwrap(Texture::create(self, path), self.logger().get()));
+        .def("load_image", [](Context& self, const std::string& path) -> py::object {
+            // sRGB with a full mip chain: files are pictures. Arrays go through
+            // create_image and stay UNORM: arrays are data.
+            //
+            // Returns IMMEDIATELY: the header is validated here (missing or
+            // mangled files fail at the call site, and width/height are right
+            // away correct), the decode + copy run on the upload worker. The
+            // image is usable for recording at once; residency is enforced at
+            // submit. img.ready / img.wait() / ctx.wait_for_uploads() are the
+            // explicit-control verbs.
+            if (!self.upload_manager()) {
+                self.set_upload_manager(std::make_unique<UploadManager>(self));
+            }
+            auto* manager = static_cast<UploadManager*>(self.upload_manager());
+            return py::cast(unwrap(manager->load(path), self.logger().get()));
         }, py::arg("path"))
+        .def_property_readonly("uploads_done", [](const Context& self) {
+            return self.upload_manager() ? self.upload_manager()->uploads_done() : true;
+        })
+        .def_property_readonly("upload_progress", [](const Context& self) {
+            // Progress of the current batch of load_image calls, 0.0 .. 1.0
+            // (1.0 when idle) — a loading bar without user-side threads.
+            return self.upload_manager() ? self.upload_manager()->upload_progress() : 1.0;
+        })
+        .def("wait_for_uploads", [](Context& self) {
+            if (self.upload_manager()) {
+                py::gil_scoped_release release;
+                self.upload_manager()->wait_all();
+            }
+        })
+        // Registered before the buffer overload so two ints never reach the
+        // buffer protocol.
+        .def("create_image", [](Context& self, uint32_t width, uint32_t height, Format format) -> py::object {
+            return py::cast(unwrap(Image::create_empty(self, width, height, format), self.logger().get()));
+        }, py::arg("width"), py::arg("height"), py::arg("format") = Format::RGBA8)
+        .def("create_image", [](Context& self, py::buffer b) -> py::object {
+            py::buffer_info info = b.request();
+            contiguous_nbytes(info, "create_image");
+
+            if (info.ndim != 2 && info.ndim != 3) {
+                raise_error(err_resource(std::format(
+                    "create_image expects a (h, w) or (h, w, channels) array, got {} dimensions",
+                    info.ndim)));
+            }
+            const auto height = static_cast<uint32_t>(info.shape[0]);
+            const auto width = static_cast<uint32_t>(info.shape[1]);
+            const py::ssize_t channels = info.ndim == 3 ? info.shape[2] : 1;
+
+            // shape + dtype -> Format. UNORM, never sRGB: arrays are data,
+            // files are pictures — the sRGB default belongs to load_image.
+            std::optional<Format> format;
+            if (info.format == "B") {          // uint8
+                if (channels == 1) format = Format::R8;
+                else if (channels == 2) format = Format::RG8;
+                else if (channels == 4) format = Format::RGBA8;
+            } else if (info.format == "e") {   // float16
+                if (channels == 1) format = Format::R16F;
+                else if (channels == 4) format = Format::RGBA16F;
+            } else if (info.format == "f") {   // float32
+                if (channels == 1) format = Format::R32F;
+                else if (channels == 4) format = Format::RGBA32F;
+            }
+
+            if (!format) {
+                if (channels == 3) {
+                    raise_error(err_resource(
+                        "create_image: 3-channel images have no portable GPU format; "
+                        "pad to 4 channels first, e.g. "
+                        "np.concatenate([arr, np.full_like(arr[..., :1], 255)], axis=-1)"));
+                }
+                raise_error(err_resource(std::format(
+                    "create_image: unsupported dtype/shape (dtype '{}', {} channel(s)). "
+                    "Supported: uint8 x 1/2/4 channels, float16 x 1/4, float32 x 1/4",
+                    info.format, channels)));
+            }
+
+            return py::cast(unwrap(
+                Image::create_from_pixels(self, info.ptr, width, height, *format),
+                self.logger().get()));
+        }, py::arg("array"))
+        .def("create_sampler", [](Context& self, Filter filter, AddressMode address_mode, bool anisotropy) -> py::object {
+            // Cached: identical descriptions return the identical object.
+            return py::cast(unwrap(self.get_sampler(SamplerDesc{ filter, address_mode, anisotropy }),
+                                   self.logger().get()));
+        }, py::arg("filter") = Filter::LINEAR, py::arg("address_mode") = AddressMode::REPEAT,
+           py::arg("anisotropy") = true)
         .def("create_descriptor_pool", [](Context& self, uint32_t maxSets, uint32_t samplers, uint32_t uniformBuffers, uint32_t storageBuffers) -> py::object {
             return py::cast(unwrap(
                 DescriptorPool::create(self, maxSets, samplers, uniformBuffers, storageBuffers),
@@ -642,32 +960,72 @@ PYBIND11_MODULE(_core, m) {
         .def("create_command_buffer", [](Context& self) -> py::object {
             return py::cast(unwrap(CommandBuffer::create(self), self.logger().get()));
         })
-        // The headless counterpart of renderer.submit(): no swapchain, no present.
-        .def("submit", &context_submit, py::arg("cmd"));
+        // The headless counterpart of frame.submit(): no swapchain, no present.
+        .def("submit", [](Context& self, std::shared_ptr<CommandBuffer> cmd) {
+            // Blocking (wait-idle inside) — release the GIL for the duration.
+            py::gil_scoped_release release;
+            context_submit(self, std::move(cmd));
+        }, py::arg("cmd"));
 
     // ── RenderTarget ──
     py::class_<RenderTarget, std::shared_ptr<RenderTarget>>(m, "RenderTargetBase");
 
     py::class_<OffscreenTarget, RenderTarget, std::shared_ptr<OffscreenTarget>>(m, "RenderTarget")
-        .def(py::init([](Context& context, std::uint32_t width, std::uint32_t height, bool depth) {
-            return unwrap(OffscreenTarget::create(context, width, height, depth), context.logger().get());
-        }), py::arg("context"), py::arg("width"), py::arg("height"), py::arg("depth") = false)
+        // color: None | Format | [Format, ...]; depth: None | Format. A bool
+        // depth is refused with a migration hint (it was one in 0.4).
+        .def(py::init([](Context& context, std::uint32_t width, std::uint32_t height,
+                         py::object color, py::object depth) {
+            std::vector<Format> colors;
+            if (!color.is_none()) {
+                if (py::isinstance<Format>(color)) {
+                    colors.push_back(color.cast<Format>());
+                } else if (py::isinstance<py::sequence>(color) && !py::isinstance<py::str>(color)) {
+                    for (auto item : color.cast<py::sequence>()) {
+                        colors.push_back(item.cast<Format>());
+                    }
+                } else {
+                    raise_error(err_resource(
+                        "color must be a bz.Format, a list of them, or None"));
+                }
+            }
+
+            std::optional<Format> depth_format;
+            if (!depth.is_none()) {
+                if (py::isinstance<py::bool_>(depth)) {
+                    raise_error(err_resource(
+                        "depth is a pixel format now: pass depth=bz.Format.D32F "
+                        "instead of depth=True"));
+                }
+                depth_format = depth.cast<Format>();
+            }
+
+            return unwrap(OffscreenTarget::create(context, width, height,
+                                                  std::move(colors), depth_format),
+                          context.logger().get());
+        }), py::arg("context"), py::arg("width"), py::arg("height"),
+            py::arg("color") = Format::RGBA8, py::arg("depth") = py::none())
         .def_property_readonly("width", [](const OffscreenTarget& t) { return t.extent().width; })
         .def_property_readonly("height", [](const OffscreenTarget& t) { return t.extent().height; })
-        .def("read_pixels", [](OffscreenTarget& self) -> py::array {
-            auto res = self.read_pixels();
-            if (!res) {
-                raise_error(res.error());
+        // The attachments are ordinary Images — this is the whole
+        // render-to-texture API: target.color[0] / target.depth into set_image.
+        .def_property_readonly("color", [](const OffscreenTarget& t) {
+            py::tuple out(t.colors().size());
+            for (size_t i = 0; i < t.colors().size(); ++i) {
+                out[i] = py::cast(t.colors()[i]);
             }
-            const std::uint32_t h = self.extent().height;
-            const std::uint32_t w = self.extent().width;
-            // Shaped (h, w, 4) so it drops straight into numpy/PIL comparisons —
-            // the whole point of readback is comparing against a golden image.
-            py::array_t<std::uint8_t> out({ static_cast<py::ssize_t>(h),
-                                            static_cast<py::ssize_t>(w),
-                                            static_cast<py::ssize_t>(4) });
-            std::memcpy(out.mutable_data(), res->data(), res->size());
             return out;
+        })
+        .def_property_readonly("depth", [](const OffscreenTarget& t) -> py::object {
+            return t.depth() ? py::cast(t.depth()) : py::none();
+        })
+        // Kept as the ergonomic spelling for colour 0; the general form is
+        // target.color[i].read().
+        .def("read_pixels", [](OffscreenTarget& self) -> py::array {
+            if (self.colors().empty()) {
+                raise_error(err_resource(
+                    "read_pixels() on a depth-only RenderTarget; read target.depth instead"));
+            }
+            return image_to_numpy(*self.colors()[0]);
         });
 
     // ── SwapchainRenderer ──
@@ -734,10 +1092,40 @@ PYBIND11_MODULE(_core, m) {
             raise_error(err_window("win32_hwnd constructor is only supported on Windows"));
 #endif
         }), py::arg("win32_hwnd"), py::arg("context"))
-        .def("begin_frame", &SwapchainRenderer::begin_frame)
-        .def("submit", &SwapchainRenderer::submit, py::arg("cmd"))
+        // Frame | None instead of bool: "the frame exists" and "here is the
+        // frame" are the same fact, so return it. renderer.submit is gone —
+        // submitting lives on the Frame you were handed.
+        .def("begin_frame", [](std::shared_ptr<SwapchainRenderer> self) -> py::object {
+            bool acquired;
+            {
+                // Waits on the in-flight fence — release the GIL meanwhile.
+                py::gil_scoped_release release;
+                acquired = self->begin_frame();
+            }
+            if (!acquired) {
+                return py::none();
+            }
+            auto frame = std::make_shared<Frame>();
+            frame->renderer = self;
+            frame->serial = self->current_serial();
+            frame->frame_index = self->current_frame();
+            frame->image_index = self->current_image_index();
+            return py::cast(frame);
+        })
         .def_property_readonly("width", [](const SwapchainRenderer& r) { return r.extent().width; })
         .def_property_readonly("height", [](const SwapchainRenderer& r) { return r.extent().height; });
+
+    py::class_<Frame, std::shared_ptr<Frame>>(m, "Frame")
+        .def("submit", [](Frame& self, std::shared_ptr<CommandBuffer> cmd) {
+            std::expected<void, Error> r;
+            {
+                // May CPU-wait for an upload still decoding — release the GIL.
+                py::gil_scoped_release release;
+                r = self.submit(std::move(cmd));
+            }
+            unwrap(std::move(r), nullptr);
+        }, py::arg("cmd"))
+        .def_property_readonly("frame_index", [](const Frame& f) { return f.frame_index; });
 
     // ── Key Constants ──
     m.attr("KEY_SPACE") = GLFW_KEY_SPACE;

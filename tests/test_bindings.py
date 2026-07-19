@@ -222,8 +222,11 @@ def test_texture_is_sampled(ctx, fullscreen_vert, tmp_path):
     write_png(png_path, [[red, green],
                          [blue, white]])
 
-    tex = ctx.load_texture(str(png_path))
+    tex = ctx.load_image(str(png_path))
     assert (tex.width, tex.height) == (2, 2)
+    # 2x2 -> a 2-level mip chain, generated automatically by load_image.
+    assert tex.mip_levels == 2
+    assert tex.format == bz.Format.RGBA8_SRGB
 
     frag = ctx.compile_shader(str(SHADER_DIR / "textured.frag"), bz.ShaderStage.FRAGMENT)
     # 62, not 64: pixel centres (15.5/62, 46.5/62) land exactly on uv 0.25/0.75,
@@ -237,7 +240,7 @@ def test_texture_is_sampled(ctx, fullscreen_vert, tmp_path):
 
     pool = ctx.create_descriptor_pool(max_sets=8, samplers=8)
     dset = pool.allocate_set(pipeline, set=0)
-    dset.set_texture(0, tex)
+    dset.set_image(0, tex)
 
     def record(cmd):
         cmd.bind_pipeline(pipeline)
@@ -254,12 +257,12 @@ def test_texture_is_sampled(ctx, fullscreen_vert, tmp_path):
     assert np.allclose(pixels[46, 46, :3], white[:3], atol=2), pixels[46, 46]
 
 
-def test_set_texture_on_buffer_binding_points_to_set_buffer(ctx, fullscreen_vert, tmp_path):
+def test_set_image_on_buffer_binding_points_to_set_buffer(ctx, fullscreen_vert, tmp_path):
     """Descriptor writes are validated against the layout at the call site,
     not left for the validation layers at submit time."""
     png_path = tmp_path / "px.png"
     write_png(png_path, [[(255, 0, 0, 255)]])
-    tex = ctx.load_texture(str(png_path))
+    tex = ctx.load_image(str(png_path))
 
     frag = ctx.compile_shader(str(SHADER_DIR / "ubo.frag"), bz.ShaderStage.FRAGMENT)
     target = bz.RenderTarget(ctx, 16, 16)
@@ -272,9 +275,9 @@ def test_set_texture_on_buffer_binding_points_to_set_buffer(ctx, fullscreen_vert
     dset = pool.allocate_set(pipeline, set=0)
 
     with pytest.raises(bz.ResourceError) as info:
-        dset.set_texture(0, tex)
+        dset.set_image(0, tex)
     assert "set_buffer" in str(info.value)
 
     with pytest.raises(bz.ResourceError) as info:
-        dset.set_texture(7, tex)
+        dset.set_image(7, tex)
     assert "7" in str(info.value)

@@ -129,6 +129,32 @@ class VertexFormat(IntEnum):
     FLOAT3 = 1
     FLOAT4 = 2
 
+class Format(IntEnum):
+    """Pixel formats.
+
+    RGBA8 is data (UNORM, what arrays and render targets default to);
+    RGBA8_SRGB is pictures (what load_image decodes into).
+    """
+    RGBA8 = 0
+    RGBA8_SRGB = 1
+    BGRA8 = 2
+    R8 = 3
+    RG8 = 4
+    R16F = 5
+    RGBA16F = 6
+    R32F = 7
+    RGBA32F = 8
+    D32F = 9
+
+class Filter(IntEnum):
+    LINEAR = 0
+    NEAREST = 1
+
+class AddressMode(IntEnum):
+    REPEAT = 0
+    CLAMP = 1
+    MIRROR = 2
+
 class CullMode(IntEnum):
     NONE = 0
     BACK = 1
@@ -163,18 +189,70 @@ class Buffer:
         ...
     def update(self, list: list, data_type: Optional[DataType] = None) -> None: ...
 
+    def read(self, dtype: Any) -> Any:
+        """Copy the buffer back to host memory as a 1-D numpy array.
+
+        dtype is mandatory — buffers carry no format, so the caller says how
+        to interpret the bytes (e.g. `ssbo.read(np.float32)`). STATIC buffers
+        take a blocking GPU round trip; DYNAMIC ones return what update()
+        last wrote into the current frame's copy.
+        """
+        ...
+
 class ShaderModule: ...
 
-class Texture:
+class Image:
+    """A GPU image: pixels + format. The sampler it used to be fused with is a
+    separate (cached) object — see Context.create_sampler."""
+
     @property
     def width(self) -> int: ...
     @property
     def height(self) -> int: ...
+    @property
+    def format(self) -> Format: ...
+    @property
+    def mip_levels(self) -> int: ...
+    @property
+    def ready(self) -> bool:
+        """Non-blocking: is the pixel data on the GPU?
+
+        False while a load_image decode/copy is still in flight. You never
+        have to poll this — a submit that uses the image waits automatically;
+        it exists for loading screens and explicit control.
+        """
+        ...
+
+    def wait(self) -> None:
+        """Block until this image's upload has finished.
+
+        A failed decode (corrupt file) surfaces here as ResourceError.
+        """
+        ...
+
+    def read(self) -> Any:
+        """Copy mip 0 back to host memory as a numpy array.
+
+        Shape is (height, width, channels) — or (height, width) for
+        single-channel formats — and the dtype follows the format (uint8,
+        float16 or float32). Blocking; a debugging and test path.
+
+        Raises ResourceError if the image has no contents yet.
+        """
+        ...
+
+class Sampler:
+    """How to read texels. Cached on the Context: identical descriptions are
+    the identical object."""
+    ...
 
 class Pipeline: ...
 
 class DescriptorSet:
-    def set_texture(self, binding: int, texture: Texture) -> None: ...
+    def set_image(self, binding: int, image: Image,
+                  sampler: Optional[Sampler] = None) -> None:
+        """Bind an image (+ sampler; None means linear/repeat/anisotropic)."""
+        ...
     def set_buffer(self, binding: int, buffer: Buffer) -> None: ...
 
 class DescriptorPool:
@@ -193,10 +271,25 @@ class RenderTargetBase:
     ...
 
 class RenderTarget(RenderTargetBase):
-    """An offscreen target backed by its own images. No window required."""
+    """An offscreen target backed by its own Images. No window required.
+
+    The attachments are ordinary Images: `target.color[0]` and `target.depth`
+    go straight into DescriptorSet.set_image — that is the whole
+    render-to-texture and shadow-map API.
+    """
 
     def __init__(self, context: Context, width: int, height: int,
-                 depth: bool = False) -> None: ...
+                 color: Optional[Format | Sequence[Format]] = Format.RGBA8,
+                 depth: Optional[Format] = None) -> None:
+        """color=None with depth=D32F makes a depth-only (shadow) target;
+        a list of formats makes an MRT target. At least one attachment is
+        required."""
+        ...
+
+    @property
+    def color(self) -> tuple[Image, ...]: ...
+    @property
+    def depth(self) -> Optional[Image]: ...
 
     @property
     def width(self) -> int: ...
@@ -227,12 +320,20 @@ class PipelineBuilder:
         ...
 
 class CommandBuffer:
-    """Records commands once; they are replayed on every submit."""
+    """Records commands once; they are replayed on every submit.
 
-    def begin(self) -> None: ...
+    Every recording method returns the command buffer itself, so calls chain:
+
+        cmd.begin_rendering(target).bind_pipeline(p).draw(3).end_rendering(target)
+
+    The statement-per-line style works identically — the return value is the
+    same object and ignoring it costs nothing.
+    """
+
+    def begin(self) -> CommandBuffer: ...
 
     def begin_rendering(self, target: RenderTargetBase,
-                        clear_color: Sequence[float] = (0.0, 0.0, 0.0, 1.0)) -> None:
+                        clear_color: Sequence[float] = (0.0, 0.0, 0.0, 1.0)) -> CommandBuffer:
         """Start rendering into `target`.
 
         Also emits a viewport and scissor covering the whole target, so the
@@ -240,29 +341,46 @@ class CommandBuffer:
         """
         ...
 
-    def end_rendering(self, target: RenderTargetBase) -> None: ...
+    def end_rendering(self, target: RenderTargetBase) -> CommandBuffer: ...
 
-    def set_viewport(self, x: float, y: float, width: float, height: float) -> None:
+    def rendering(self, target: RenderTargetBase,
+                  clear_color: Sequence[float] = (0.0, 0.0, 0.0, 1.0)) -> RenderingScope:
+        """The begin/end pair as a context manager:
+
+            with cmd.rendering(target, clear_color=[0, 0, 0, 1]) as c:
+                c.bind_pipeline(p).draw(3)
+
+        end_rendering is recorded on exit, exceptions included.
+        """
+        ...
+
+    def set_viewport(self, x: float, y: float, width: float, height: float) -> CommandBuffer:
         """Override the automatic full-target viewport (split-screen and similar)."""
         ...
 
-    def set_scissor(self, x: int, y: int, width: int, height: int) -> None: ...
+    def set_scissor(self, x: int, y: int, width: int, height: int) -> CommandBuffer: ...
 
-    def bind_pipeline(self, pipeline: Pipeline) -> None: ...
-    def bind_vertex_buffer(self, buffer: Buffer) -> None: ...
-    def bind_index_buffer(self, buffer: Buffer) -> None: ...
-    def draw(self, vertex_count: int) -> None: ...
+    def bind_pipeline(self, pipeline: Pipeline) -> CommandBuffer: ...
+    def bind_vertex_buffer(self, buffer: Buffer) -> CommandBuffer: ...
+    def bind_index_buffer(self, buffer: Buffer) -> CommandBuffer: ...
+    def draw(self, vertex_count: int) -> CommandBuffer: ...
     def draw_indexed(self, index_count: int, first_index: int = 0,
-                     vertex_offset: int = 0) -> None: ...
+                     vertex_offset: int = 0) -> CommandBuffer: ...
     def draw_indexed_instanced(self, index_count: int, instance_count: int,
-                               first_index: int = 0, vertex_offset: int = 0) -> None: ...
+                               first_index: int = 0, vertex_offset: int = 0) -> CommandBuffer: ...
 
-    def push_constants(self, pipeline: Pipeline, offset: int, data: bytes) -> None:
+    def push_constants(self, pipeline: Pipeline, offset: int, data: bytes) -> CommandBuffer:
         """The Pipeline already knows which stages its range covers."""
         ...
 
     def bind_descriptor_set(self, descriptor_set: DescriptorSet, pipeline: Pipeline,
-                            set: int) -> None: ...
+                            set: int) -> CommandBuffer: ...
+
+class RenderingScope:
+    """Returned by CommandBuffer.rendering(); use it in a `with` statement."""
+
+    def __enter__(self) -> CommandBuffer: ...
+    def __exit__(self, exc_type: Any, exc: Any, tb: Any) -> bool: ...
 
 class Window:
     def __init__(self, width: int, height: int, title: str,
@@ -290,6 +408,7 @@ class Context:
 
     def __init__(self, logger: Optional[Logger] = None, validation: str = "auto",
                  features: Sequence[Feature] = (), optional: Sequence[Feature] = (),
+                 frames_in_flight: int = 2,
                  raw_extensions: Sequence[str] = ()) -> None:
         """
         Args:
@@ -297,12 +416,17 @@ class Context:
             validation: "auto" (on when the layers are installed), "on", or "off".
             features: required. Gates GPU selection; InitializationError if absent.
             optional: enabled when present; query with `supports()`.
+            frames_in_flight: how many frames may be recorded ahead of the GPU
+                (1-4). 2 is the classic latency/throughput trade-off; 1 is
+                useful for debugging.
             raw_extensions: escape hatch. You shouldn't need this.
         """
         ...
 
     @property
     def logger(self) -> Logger: ...
+    @property
+    def frames_in_flight(self) -> int: ...
     @property
     def device_name(self) -> str: ...
     @property
@@ -323,7 +447,46 @@ class Context:
 
     def pipeline_builder(self) -> PipelineBuilder: ...
     def compile_shader(self, path: str, stage: ShaderStage) -> ShaderModule: ...
-    def load_texture(self, path: str) -> Texture: ...
+
+    def load_image(self, path: str) -> Image:
+        """Decode an image file into an sRGB GPU image with a full mip chain.
+
+        Returns IMMEDIATELY: the file header is validated here (a missing or
+        corrupt file raises ResourceError at this call), but the decode and
+        GPU copy run on a background worker. The image is usable for
+        recording right away — a submit that samples it waits for the upload
+        automatically. `img.ready`, `img.wait()` and `ctx.wait_for_uploads()`
+        are the explicit-control verbs.
+        """
+        ...
+
+    @property
+    def uploads_done(self) -> bool:
+        """Non-blocking: have all load_image uploads finished?"""
+        ...
+    @property
+    def upload_progress(self) -> float:
+        """0.0 .. 1.0 for the current batch of load_image calls (1.0 when
+        idle) — a loading bar without user-side threads:
+
+            while not ctx.uploads_done:
+                draw_progress(ctx.upload_progress)
+        """
+        ...
+    def wait_for_uploads(self) -> None:
+        """Block until every pending load_image upload has finished."""
+        ...
+    def create_image(self, width: int, height: int,
+                     format: Format = Format.RGBA8) -> Image: ...
+    def create_image(self, array: Any) -> Image:
+        """From a numpy array; shape + dtype pick the format (UNORM — arrays
+        are data, files are pictures). (h, w, 3) has no portable GPU format
+        and raises ResourceError with a padding hint.
+        """
+        ...
+    def create_sampler(self, filter: Filter = Filter.LINEAR,
+                       address_mode: AddressMode = AddressMode.REPEAT,
+                       anisotropy: bool = True) -> Sampler: ...
     def create_descriptor_pool(self, max_sets: int, samplers: int = 0,
                                uniform_buffers: int = 0,
                                storage_buffers: int = 0) -> DescriptorPool: ...
@@ -348,18 +511,35 @@ class SwapchainRenderer(RenderTargetBase):
         """Attach to an existing native window (Windows only)."""
         ...
 
-    def begin_frame(self) -> bool:
-        """Acquire the next swapchain image. False when the frame should be skipped."""
-        ...
+    def begin_frame(self) -> Optional[Frame]:
+        """Acquire the next swapchain image.
 
-    def submit(self, cmd: CommandBuffer) -> None:
-        """Submit for the current frame and present."""
+        None when the frame should be skipped (minimized, mid-resize):
+
+            frame = renderer.begin_frame()
+            if frame:
+                frame.submit(cmd)
+        """
         ...
 
     @property
     def width(self) -> int: ...
     @property
     def height(self) -> int: ...
+
+class Frame:
+    """One acquired swapchain frame. Submit it and drop it within one tick.
+
+    Submitting twice, or holding a Frame across begin_frame() calls, raises
+    ResourceError.
+    """
+
+    def submit(self, cmd: CommandBuffer) -> None:
+        """Record the command buffer for this frame, submit it and present."""
+        ...
+
+    @property
+    def frame_index(self) -> int: ...
 
 # ── Keyboard Constants ─────────────────────────────────────────────────
 

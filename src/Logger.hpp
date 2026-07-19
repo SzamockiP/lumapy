@@ -64,6 +64,11 @@ public:
 	explicit Logger(Severity min_severity = Severity::Warning)
 		: min_severity_(min_severity)
 	{
+		{
+			std::lock_guard lock(registry_mutex());
+			registry().push_back(this);
+		}
+
 		log_thread_ = std::jthread([this](std::stop_token stop_token)
 			{
 				while (true)
@@ -82,7 +87,25 @@ public:
 
 	~Logger()
 	{
+		{
+			std::lock_guard lock(registry_mutex());
+			std::erase(registry(), this);
+		}
 		shutdown();
+	}
+
+	// The drain thread calls into Python, so it must be joined BEFORE the
+	// interpreter starts finalizing — a logger still alive at process exit
+	// (any script that ends with its Context in scope) would otherwise crash
+	// with "could not acquire lock for stderr at interpreter shutdown". The
+	// module registers this with atexit, which runs while Python is intact.
+	static void shutdown_all()
+	{
+		std::lock_guard lock(registry_mutex());
+		for (Logger* logger : registry())
+		{
+			logger->shutdown();
+		}
 	}
 
 	Logger(const Logger&) = delete;
@@ -105,6 +128,22 @@ public:
 		std::lock_guard<std::mutex> lock(callbacks_mutex_);
 		callbacks_.push_back(std::move(callback));
 	}
+
+private:
+	// Every live logger, so atexit can join every drain thread. Raw pointers:
+	// the destructor unregisters under the same mutex.
+	static std::mutex& registry_mutex()
+	{
+		static std::mutex mutex;
+		return mutex;
+	}
+	static std::vector<Logger*>& registry()
+	{
+		static std::vector<Logger*> loggers;
+		return loggers;
+	}
+
+public:
 
 	Severity min_severity() const { return min_severity_; }
 	void set_min_severity(Severity severity) { min_severity_ = severity; }

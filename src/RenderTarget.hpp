@@ -5,10 +5,13 @@
 #include <cstdint>
 #include <expected>
 #include <memory>
+#include <optional>
 #include <vector>
 
 #include "Context.hpp"
 #include "Error.hpp"
+#include "Format.hpp"
+#include "Image.hpp"
 #include "ImmediateSubmit.hpp"
 
 // Anything that can be drawn into.
@@ -47,6 +50,16 @@ public:
 	// hardcoded present transition from CommandBuffer.
 	virtual VkImageLayout final_layout() const = 0;
 
+	// Same question for the depth attachment. The swapchain's depth buffer is
+	// scratch (stays DEPTH_ATTACHMENT_OPTIMAL, store DONT_CARE); an offscreen
+	// depth ends sampleable, which is the whole of what makes `shadow.depth` a
+	// texture with zero extra API. end_rendering also derives its store-op from
+	// this: a depth that will be consumed must be stored.
+	virtual VkImageLayout depth_final_layout() const
+	{
+		return VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL;
+	}
+
 	// Called by CommandBuffer when the end-of-rendering barrier is recorded into
 	// a real submit. An OffscreenTarget uses this to learn that its image has
 	// left UNDEFINED — the submit paths never see the target (it lives inside the
@@ -65,249 +78,119 @@ struct FrameContext
 	std::uint32_t frame_index = 0;
 };
 
-// A render target backed by images this object owns, with no swapchain and no
+// A render target backed by Images this object owns, with no swapchain and no
 // window involved. This is what makes headless rendering — and therefore the
-// test suite — possible.
+// test suite — possible. The attachments are ordinary bz.Image objects, which
+// is the whole render-to-texture story: `target.color[0]` and `target.depth`
+// go straight into set_image() with no extra API.
 class OffscreenTarget : public RenderTarget, public std::enable_shared_from_this<OffscreenTarget>
 {
 public:
 	static std::expected<std::shared_ptr<OffscreenTarget>, Error> create(
-		Context& context, std::uint32_t width, std::uint32_t height, bool with_depth)
+		Context& context, std::uint32_t width, std::uint32_t height,
+		std::vector<Format> colors, std::optional<Format> depth)
 	{
+		if (colors.empty() && !depth)
+		{
+			return std::unexpected(err_resource(
+				"A RenderTarget needs at least one attachment: pass color=..., "
+				"depth=..., or both"));
+		}
+		for (Format f : colors)
+		{
+			if (format_info(f).depth)
+			{
+				return std::unexpected(err_resource(std::format(
+					"{} is a depth format and cannot be a colour attachment; "
+					"pass it as depth= instead", format_name(f))));
+			}
+		}
+		if (depth && !format_info(*depth).depth)
+		{
+			return std::unexpected(err_resource(std::format(
+				"{} is not a depth format; use bz.Format.D32F", format_name(*depth))));
+		}
+
 		auto target = std::shared_ptr<OffscreenTarget>(new OffscreenTarget(context.shared_from_this()));
 		target->extent_ = { width, height };
 
-		// TRANSFER_SRC so read_pixels() can copy the result back out; SAMPLED so
-		// the same image can be fed straight into a descriptor set (render-to-
-		// texture needs no separate API — it's just this image).
-		VkImageCreateInfo colorInfo{
-			.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO,
-			.pNext = nullptr,
-			.flags = 0,
-			.imageType = VK_IMAGE_TYPE_2D,
-			.format = target->color_format_,
-			.extent = { width, height, 1 },
-			.mipLevels = 1,
-			.arrayLayers = 1,
-			.samples = VK_SAMPLE_COUNT_1_BIT,
-			.tiling = VK_IMAGE_TILING_OPTIMAL,
-			.usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT |
-			         VK_IMAGE_USAGE_SAMPLED_BIT,
-			.sharingMode = VK_SHARING_MODE_EXCLUSIVE,
-			.queueFamilyIndexCount = 0,
-			.pQueueFamilyIndices = nullptr,
-			.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED
-		};
-
-		VmaAllocationCreateInfo allocInfo{};
-		allocInfo.usage = VMA_MEMORY_USAGE_GPU_ONLY;
-
-		if (auto e = check(vmaCreateImage(context.allocator(), &colorInfo, &allocInfo,
-		                                  &target->color_image_, &target->color_allocation_, nullptr),
-		                   "create offscreen colour image", ErrorCode::Resource))
+		for (Format f : colors)
 		{
-			return std::unexpected(*e);
-		}
-
-		VkImageViewCreateInfo colorViewInfo{
-			.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
-			.pNext = nullptr,
-			.flags = 0,
-			.image = target->color_image_,
-			.viewType = VK_IMAGE_VIEW_TYPE_2D,
-			.format = target->color_format_,
-			.components = {},
-			.subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 }
-		};
-
-		if (auto e = check(vkCreateImageView(context.device(), &colorViewInfo, nullptr, &target->color_view_),
-		                   "create offscreen colour image view", ErrorCode::Resource))
-		{
-			return std::unexpected(*e);
-		}
-
-		if (with_depth)
-		{
-			VkImageCreateInfo depthInfo = colorInfo;
-			depthInfo.format = target->depth_format_;
-			depthInfo.usage = VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT;
-
-			if (auto e = check(vmaCreateImage(context.allocator(), &depthInfo, &allocInfo,
-			                                  &target->depth_image_, &target->depth_allocation_, nullptr),
-			                   "create offscreen depth image", ErrorCode::Resource))
+			auto image = Image::create_empty(context, width, height, f);
+			if (!image)
 			{
-				return std::unexpected(*e);
+				return std::unexpected(image.error());
 			}
-
-			VkImageViewCreateInfo depthViewInfo = colorViewInfo;
-			depthViewInfo.image = target->depth_image_;
-			depthViewInfo.format = target->depth_format_;
-			depthViewInfo.subresourceRange.aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT;
-
-			if (auto e = check(vkCreateImageView(context.device(), &depthViewInfo, nullptr, &target->depth_view_),
-			                   "create offscreen depth image view", ErrorCode::Resource))
+			target->colors_.push_back(std::move(*image));
+		}
+		if (depth)
+		{
+			auto image = Image::create_empty(context, width, height, *depth);
+			if (!image)
 			{
-				return std::unexpected(*e);
+				return std::unexpected(image.error());
 			}
+			target->depth_ = std::move(*image);
 		}
 
 		return target;
 	}
 
-	~OffscreenTarget() override
-	{
-		if (!context_)
-		{
-			return;
-		}
-		if (depth_view_) vkDestroyImageView(context_->device(), depth_view_, nullptr);
-		if (depth_image_) vmaDestroyImage(context_->allocator(), depth_image_, depth_allocation_);
-		if (color_view_) vkDestroyImageView(context_->device(), color_view_, nullptr);
-		if (color_image_) vmaDestroyImage(context_->allocator(), color_image_, color_allocation_);
-	}
-
 	OffscreenTarget(const OffscreenTarget&) = delete;
 	OffscreenTarget& operator=(const OffscreenTarget&) = delete;
 
-	std::uint32_t color_count() const override { return 1; }
-	VkImage color_image(std::uint32_t) const override { return color_image_; }
-	VkImageView color_view(std::uint32_t) const override { return color_view_; }
-	VkFormat color_format(std::uint32_t) const override { return color_format_; }
-	VkImage depth_image() const override { return depth_image_; }
-	VkImageView depth_view() const override { return depth_view_; }
-	VkFormat depth_format() const override { return depth_image_ ? depth_format_ : VK_FORMAT_UNDEFINED; }
+	std::uint32_t color_count() const override { return static_cast<std::uint32_t>(colors_.size()); }
+	VkImage color_image(std::uint32_t i) const override { return colors_[i]->vk_image(); }
+	VkImageView color_view(std::uint32_t i) const override { return colors_[i]->view(); }
+	VkFormat color_format(std::uint32_t i) const override { return format_info(colors_[i]->format()).vk; }
+	VkImage depth_image() const override { return depth_ ? depth_->vk_image() : VK_NULL_HANDLE; }
+	VkImageView depth_view() const override { return depth_ ? depth_->view() : VK_NULL_HANDLE; }
+	VkFormat depth_format() const override { return depth_ ? format_info(depth_->format()).vk : VK_FORMAT_UNDEFINED; }
 	VkExtent2D extent() const override { return extent_; }
 
 	// Left ready to be sampled, so using the result as a texture needs no extra
-	// step. read_pixels() transitions from here when it needs to.
+	// step — colour and depth both.
 	VkImageLayout final_layout() const override { return VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL; }
+	VkImageLayout depth_final_layout() const override { return VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL; }
 
-	// Copies the colour attachment back to host memory. Blocking, and it stalls
-	// the GPU — acceptable because this is a debugging/test path, not a per-frame
-	// one. 0.5 replaces the stall with the timeline-based UploadManager.
-	std::expected<std::vector<std::uint8_t>, Error> read_pixels()
+	// The attachments as Images, for Python and for readback.
+	const std::vector<std::shared_ptr<Image>>& colors() const { return colors_; }
+	const std::shared_ptr<Image>& depth() const { return depth_; }
+
+	// Copies colour attachment 0 back to host memory; kept as the ergonomic
+	// spelling for tests (target.color[0].read() is the general form).
+	std::expected<std::vector<std::byte>, Error> read_pixels()
 	{
-		// Refuse rather than return uninitialised VRAM: before the first submit the
-		// image is UNDEFINED, and a barrier claiming otherwise would let the driver
-		// hand back garbage that *sometimes* looks right.
-		if (!rendered_)
+		if (colors_.empty())
 		{
 			return std::unexpected(err_resource(
-				"read_pixels() called on a RenderTarget that has never been rendered "
-				"to; submit a command buffer targeting it first"));
+				"read_pixels() on a depth-only RenderTarget; read target.depth instead"));
 		}
-
-		const VkDeviceSize size = static_cast<VkDeviceSize>(extent_.width) * extent_.height * 4;
-
-		VkBufferCreateInfo bufferInfo{
-			.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
-			.pNext = nullptr,
-			.flags = 0,
-			.size = size,
-			.usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT,
-			.sharingMode = VK_SHARING_MODE_EXCLUSIVE,
-			.queueFamilyIndexCount = 0,
-			.pQueueFamilyIndices = nullptr
-		};
-
-		VmaAllocationCreateInfo allocInfo{};
-		allocInfo.usage = VMA_MEMORY_USAGE_GPU_TO_CPU;
-		allocInfo.flags = VMA_ALLOCATION_CREATE_HOST_ACCESS_RANDOM_BIT;
-
-		VkBuffer staging = VK_NULL_HANDLE;
-		VmaAllocation staging_alloc = VK_NULL_HANDLE;
-		if (auto e = check(vmaCreateBuffer(context_->allocator(), &bufferInfo, &allocInfo,
-		                                   &staging, &staging_alloc, nullptr),
-		                   "create readback buffer", ErrorCode::Resource))
-		{
-			return std::unexpected(*e);
-		}
-
-		auto submitted = immediate_submit(*context_, [&](VkCommandBuffer cmd) {
-			// The image is in final_layout() after rendering; move it to TRANSFER_SRC
-			// and back so the target stays usable for sampling afterwards.
-			transition(cmd, final_layout(), VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
-
-			VkBufferImageCopy region{
-				.bufferOffset = 0,
-				.bufferRowLength = 0,
-				.bufferImageHeight = 0,
-				.imageSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 },
-				.imageOffset = { 0, 0, 0 },
-				.imageExtent = { extent_.width, extent_.height, 1 }
-			};
-			vkCmdCopyImageToBuffer(cmd, color_image_, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, staging, 1, &region);
-
-			transition(cmd, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, final_layout());
-		});
-		if (!submitted)
-		{
-			vmaDestroyBuffer(context_->allocator(), staging, staging_alloc);
-			return std::unexpected(submitted.error());
-		}
-
-		std::vector<std::uint8_t> pixels(static_cast<size_t>(size));
-		void* mapped = nullptr;
-		if (auto e = check(vmaMapMemory(context_->allocator(), staging_alloc, &mapped),
-		                   "map readback buffer memory", ErrorCode::Resource))
-		{
-			vmaDestroyBuffer(context_->allocator(), staging, staging_alloc);
-			return std::unexpected(*e);
-		}
-		std::memcpy(pixels.data(), mapped, static_cast<size_t>(size));
-		vmaUnmapMemory(context_->allocator(), staging_alloc);
-		vmaDestroyBuffer(context_->allocator(), staging, staging_alloc);
-
-		return pixels;
+		return colors_[0]->read();
 	}
 
-	bool rendered_at_least_once() const { return rendered_; }
-
-	// Flipped by the end-of-rendering barrier at execute() time — i.e. only when
-	// work targeting this image is actually submitted. This used to be a public
-	// mark_rendered() that nothing ever called, which left rendered_ permanently
-	// false and read_pixels() transitioning from UNDEFINED — a spec-sanctioned
-	// licence for the driver to discard the just-rendered contents.
-	void on_rendering_recorded() override { rendered_ = true; }
+	// Runs at execute() time, inside a real submit — the attachments learn they
+	// have contents exactly when that becomes true (the 0.4.1 read_pixels fix,
+	// now spelled per-Image). Depth included: that is what makes shadow maps
+	// readable and sampleable.
+	void on_rendering_recorded() override
+	{
+		for (auto& image : colors_)
+		{
+			image->mark_has_contents(final_layout());
+		}
+		if (depth_)
+		{
+			depth_->mark_has_contents(depth_final_layout());
+		}
+	}
 
 private:
 	explicit OffscreenTarget(std::shared_ptr<Context> context) : context_(std::move(context)) {}
 
-	void transition(VkCommandBuffer cmd, VkImageLayout from, VkImageLayout to)
-	{
-		// `from` is always truthful here: read_pixels() refuses to run before the
-		// first render, so the image is guaranteed to be in final_layout() by the
-		// time this barrier is recorded.
-		VkImageMemoryBarrier barrier{
-			.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
-			.pNext = nullptr,
-			.srcAccessMask = VK_ACCESS_MEMORY_WRITE_BIT,
-			.dstAccessMask = VK_ACCESS_MEMORY_READ_BIT,
-			.oldLayout = from,
-			.newLayout = to,
-			.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
-			.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
-			.image = color_image_,
-			.subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 }
-		};
-		vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
-		                     0, 0, nullptr, 0, nullptr, 1, &barrier);
-	}
-
 	std::shared_ptr<Context> context_;
 	VkExtent2D extent_{};
 
-	// 0.5 makes these configurable; 0.4 only needs the abstraction to exist.
-	VkFormat color_format_ = VK_FORMAT_R8G8B8A8_UNORM;
-	VkFormat depth_format_ = VK_FORMAT_D32_SFLOAT;
-
-	VkImage color_image_ = VK_NULL_HANDLE;
-	VmaAllocation color_allocation_ = VK_NULL_HANDLE;
-	VkImageView color_view_ = VK_NULL_HANDLE;
-
-	VkImage depth_image_ = VK_NULL_HANDLE;
-	VmaAllocation depth_allocation_ = VK_NULL_HANDLE;
-	VkImageView depth_view_ = VK_NULL_HANDLE;
-
-	bool rendered_ = false;
+	std::vector<std::shared_ptr<Image>> colors_;
+	std::shared_ptr<Image> depth_;
 };

@@ -4,16 +4,22 @@
 #include <vk_mem_alloc.h>
 
 #include <atomic>
+#include <deque>
 #include <expected>
 #include <format>
+#include <functional>
 #include <memory>
+#include <mutex>
 #include <set>
 #include <string>
+#include <unordered_map>
+#include <utility>
 #include <vector>
 
 #include "Error.hpp"
 #include "Features.hpp"
 #include "Logger.hpp"
+#include "Sampler.hpp"
 
 // How hard to try to turn on the validation layers.
 //
@@ -26,12 +32,29 @@ enum class ValidationMode
 	On,
 };
 
+// The async upload machinery, seen from the Context's side. A tiny virtual
+// interface rather than the real class: UploadManager.hpp needs Context.hpp
+// (queues, timeline, deletion queue), so Context can only know it abstractly.
+// main.cpp creates the concrete UploadManager lazily on the first load_image.
+class UploadManagerBase
+{
+public:
+	virtual ~UploadManagerBase() = default;
+	virtual bool uploads_done() = 0;
+	virtual double upload_progress() = 0;
+	virtual void wait_all() = 0;
+};
+
 // Everything the caller can ask of a Context, in capability terms.
 struct ContextConfig
 {
 	ValidationMode validation = ValidationMode::Auto;
 	std::vector<Feature> required;
 	std::vector<Feature> optional;
+
+	// How many frames may be recorded ahead of the GPU. 2 is the classic
+	// latency/throughput trade-off; 1 is legal and useful for debugging.
+	std::uint32_t frames_in_flight = 2;
 
 	// Escape hatch, documented as "you shouldn't need this". Present so that the
 	// capability abstraction never becomes a ceiling.
@@ -41,8 +64,6 @@ struct ContextConfig
 class Context : public std::enable_shared_from_this<Context>
 {
 public:
-	static constexpr int MAX_FRAMES_IN_FLIGHT = 2;
-
 	static std::expected<std::shared_ptr<Context>, Error> create(
 		std::shared_ptr<Logger> logger,
 		const ContextConfig& config = {})
@@ -64,7 +85,14 @@ public:
 				"creating another (creating them one after another is fine)."));
 		}
 
+		if (config.frames_in_flight < 1 || config.frames_in_flight > 4)
+		{
+			return std::unexpected(err_init(std::format(
+				"frames_in_flight must be between 1 and 4, got {}", config.frames_in_flight)));
+		}
+
 		auto context = std::shared_ptr<Context>(new Context(logger));
+		context->frames_in_flight_ = config.frames_in_flight;
 
 		auto target_api = create_instance_(*context, config, logger);
 		if (!target_api)
@@ -116,9 +144,34 @@ public:
 			live_contexts_.fetch_sub(1);
 		}
 
+		// First: stop the upload worker. Its destructor abandons undecoded jobs
+		// (the process is going away; decoding more would only delay exit),
+		// finishes at most one in-flight submit, joins, and destroys its command
+		// pool — all of which needs the device still alive.
+		upload_manager_.reset();
+
 		if (vkb_device_.device)
 		{
 			vkDeviceWaitIdle(vkb_device_.device);
+		}
+
+		// Everything is complete now; run whatever is still queued before the
+		// pool and allocator below disappear out from under the lambdas.
+		for (auto& [serial, fn] : deletion_queue_)
+		{
+			fn();
+		}
+		deletion_queue_.clear();
+
+		for (auto& [key, sampler] : sampler_cache_)
+		{
+			vkDestroySampler(vkb_device_.device, sampler->get(), nullptr);
+		}
+		sampler_cache_.clear();
+
+		if (submit_timeline_)
+		{
+			vkDestroySemaphore(vkb_device_.device, submit_timeline_, nullptr);
 		}
 
 		if (command_pool_)
@@ -175,16 +228,180 @@ public:
 	bool headless() const { return headless_; }
 	bool swapchain_supported() const { return swapchain_supported_; }
 
-	// Frame tracking — updated by the active renderer.
-	// 0.5 moves this onto a FrameRing driven by Context::begin_frame(), which is
-	// what lets headless/compute-only users advance frames and what lifts the
-	// one-renderer-per-Context restriction below.
-	std::uint32_t current_frame() const { return current_frame_; }
-	void set_current_frame(std::uint32_t frame) { current_frame_ = frame; }
+	// ── Frame ring ────────────────────────────────────────────────────────────
+	//
+	// The Context owns and advances the frame counter; renderers and the
+	// headless submit path both call begin_frame_internal() when a new frame
+	// starts. A monotonic serial rather than a wrapping index, because the
+	// deletion queue and upload bookkeeping need "how far has the GPU
+	// progressed", which a modulo index cannot answer.
+	std::uint32_t frames_in_flight() const { return frames_in_flight_; }
+	std::uint64_t frame_serial() const { return frame_serial_; }
+	std::uint32_t frame_index() const
+	{
+		return static_cast<std::uint32_t>(frame_serial_ % frames_in_flight_);
+	}
 
-	// Guards against two SwapchainRenderers fighting over current_frame_.
+	// Not exposed to Python: headless users have exactly one verb (ctx.submit),
+	// and a second frame-advancing verb would be a footgun until multiple
+	// submits per frame exist.
+	//
+	// Call sites pick the boundary that keeps `buffer.update()` and the submit
+	// that consumes it on the SAME ring slot: SwapchainRenderer::begin_frame
+	// advances on entry (updates happen between begin and submit), the headless
+	// ctx.submit advances after submitting (updates happen before the call).
+	std::uint64_t advance_frame()
+	{
+		return ++frame_serial_;
+	}
+
+	// ── Submission timeline ───────────────────────────────────────────────────
+	//
+	// One timeline semaphore counts EVERY submission on the graphics queue —
+	// frame submits, headless submits, one-shot submits, async uploads. Its
+	// counter answers the only synchronization question the CPU side ever asks:
+	// "has the GPU passed point X?" — uniformly for windowed and headless, and
+	// it is what makes async uploads awaitable.
+	VkSemaphore submit_timeline() const { return submit_timeline_; }
+
+	// Reserve the serial the next submit will signal. Call while holding
+	// queue_mutex(), immediately before the vkQueueSubmit that signals it.
+	std::uint64_t advance_submit_serial() { return ++submit_serial_; }
+	std::uint64_t submit_serial() const { return submit_serial_.load(); }
+
+	std::uint64_t completed_submit_serial() const
+	{
+		std::uint64_t value = 0;
+		vkGetSemaphoreCounterValue(vkb_device_.device, submit_timeline_, &value);
+		return value;
+	}
+
+	// ── Deferred destruction ──────────────────────────────────────────────────
+	//
+	// A handle dropped on the CPU may still be referenced by work the GPU is
+	// chewing through, so resource destructors enqueue their vkDestroy calls
+	// here instead of running them inline. An entry is keyed by the submit
+	// serial at drop time — no later submit can reference the handle (any
+	// recording that did held a shared_ptr, which is gone by the time a
+	// destructor runs) — and runs once the timeline passes that serial.
+	//
+	// The lambdas capture raw handles plus the VkDevice/VmaAllocator values —
+	// never a shared_ptr<Context>, which would keep the Context alive from its
+	// own member and leak everything.
+	//
+	// Thread-safe: the upload worker parks its staging buffers here too.
+	void defer_destroy(std::function<void()> fn)
+	{
+		std::lock_guard lock(deletion_mutex_);
+		deletion_queue_.emplace_back(submit_serial_.load(), std::move(fn));
+	}
+
+	void flush_deletion_queue()
+	{
+		const std::uint64_t completed = completed_submit_serial();
+
+		// Run the ready entries outside the lock: a destructor lambda must be
+		// free to enqueue (it doesn't today, but that trap is invisible).
+		std::vector<std::function<void()>> ready;
+		{
+			std::lock_guard lock(deletion_mutex_);
+			// Two producers interleave, so keys are not strictly ordered —
+			// scan rather than pop-from-front. The queue stays tiny.
+			for (auto it = deletion_queue_.begin(); it != deletion_queue_.end();)
+			{
+				if (it->first <= completed)
+				{
+					ready.push_back(std::move(it->second));
+					it = deletion_queue_.erase(it);
+				}
+				else
+				{
+					++it;
+				}
+			}
+		}
+		for (auto& fn : ready)
+		{
+			fn();
+		}
+	}
+
+	// ── Async uploads ─────────────────────────────────────────────────────────
+
+	UploadManagerBase* upload_manager() const { return upload_manager_.get(); }
+	void set_upload_manager(std::unique_ptr<UploadManagerBase> manager)
+	{
+		upload_manager_ = std::move(manager);
+	}
+
+	// ── Sampler cache ─────────────────────────────────────────────────────────
+	//
+	// Identical descriptions share one VkSampler; Texture used to create a
+	// fresh sampler per texture. Cached handles live until ~Context — the
+	// descriptor space is a handful of combinations, never worth evicting.
+	std::expected<std::shared_ptr<Sampler>, Error> get_sampler(const SamplerDesc& desc)
+	{
+		const std::uint32_t key = sampler_cache_key(desc);
+		if (auto it = sampler_cache_.find(key); it != sampler_cache_.end())
+		{
+			return it->second;
+		}
+
+		const bool anisotropy = desc.anisotropy && supports(Feature::ANISOTROPIC_FILTERING);
+		const VkFilter filter = desc.filter == Filter::NEAREST ? VK_FILTER_NEAREST : VK_FILTER_LINEAR;
+		VkSamplerAddressMode address = VK_SAMPLER_ADDRESS_MODE_REPEAT;
+		switch (desc.address_mode)
+		{
+			case AddressMode::REPEAT: address = VK_SAMPLER_ADDRESS_MODE_REPEAT; break;
+			case AddressMode::CLAMP: address = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE; break;
+			case AddressMode::MIRROR: address = VK_SAMPLER_ADDRESS_MODE_MIRRORED_REPEAT; break;
+		}
+
+		VkSamplerCreateInfo info{
+			.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO,
+			.pNext = nullptr,
+			.flags = 0,
+			.magFilter = filter,
+			.minFilter = filter,
+			.mipmapMode = desc.filter == Filter::NEAREST
+				? VK_SAMPLER_MIPMAP_MODE_NEAREST : VK_SAMPLER_MIPMAP_MODE_LINEAR,
+			.addressModeU = address,
+			.addressModeV = address,
+			.addressModeW = address,
+			.mipLodBias = 0.0f,
+			.anisotropyEnable = anisotropy ? VK_TRUE : VK_FALSE,
+			.maxAnisotropy = anisotropy ? 16.0f : 1.0f,
+			.compareEnable = VK_FALSE,
+			.compareOp = VK_COMPARE_OP_ALWAYS,
+			.minLod = 0.0f,
+			// The whole mip chain. The old per-texture sampler had maxLod = 0,
+			// which would have clamped every mip away the moment mips existed.
+			.maxLod = VK_LOD_CLAMP_NONE,
+			.borderColor = VK_BORDER_COLOR_INT_OPAQUE_BLACK,
+			.unnormalizedCoordinates = VK_FALSE
+		};
+
+		VkSampler handle = VK_NULL_HANDLE;
+		if (auto e = check(vkCreateSampler(vkb_device_.device, &info, nullptr, &handle),
+		                   "create sampler", ErrorCode::Resource))
+		{
+			return std::unexpected(*e);
+		}
+
+		auto sampler = std::make_shared<Sampler>(handle, desc);
+		sampler_cache_.emplace(key, sampler);
+		return sampler;
+	}
+
+	// Guards against two SwapchainRenderers fighting over the frame ring.
 	bool has_swapchain_renderer() const { return has_swapchain_renderer_; }
 	void set_has_swapchain_renderer(bool value) { has_swapchain_renderer_ = value; }
+
+	// VkQueue is externally synchronized. Today every submit happens on the main
+	// thread, so this mutex is uncontended — it exists because 0.5's upload
+	// worker submits from its own thread, and every vkQueueSubmit/Present/
+	// WaitIdle must hold it from then on.
+	std::mutex& queue_mutex() { return queue_mutex_; }
 
 private:
 	Context(std::shared_ptr<Logger> logger) : logger_(logger) {}
@@ -408,6 +625,27 @@ private:
 			ctx.enabled_features_.insert(Feature::ANISOTROPIC_FILTERING);
 		}
 
+		// Timeline semaphores pace the deletion queue and async uploads. They are
+		// core in 1.2 (our floor), so the entry points are always loaded — but the
+		// feature bit still has to be enabled at device creation, and checking it
+		// here turns a cryptic device-creation error code into a sentence.
+		VkPhysicalDeviceVulkan12Features available12{
+			.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES,
+			.pNext = nullptr
+		};
+		VkPhysicalDeviceFeatures2 available2{
+			.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2,
+			.pNext = &available12
+		};
+		vkGetPhysicalDeviceFeatures2(ctx.vkb_physical_device_.physical_device, &available2);
+		if (!available12.timelineSemaphore)
+		{
+			return std::unexpected(err_init(
+				"Vulkan: this GPU/driver does not support timeline semaphores, which "
+				"bazalt requires (they are mandatory in conformant Vulkan 1.2 drivers). "
+				"Updating the graphics driver usually fixes this."));
+		}
+
 		ctx.vkb_physical_device_.enable_features_if_present(enabled_features);
 		return {};
 	}
@@ -432,7 +670,17 @@ private:
 			.dynamicRendering = VK_TRUE
 		};
 
+		// Core in 1.2, so this rides along on both paths. No KHR aliasing needed,
+		// unlike dynamic rendering: the floor is 1.2, so the core entry points
+		// (vkWaitSemaphores etc.) are always loaded.
+		VkPhysicalDeviceVulkan12Features features12{
+			.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES,
+			.pNext = nullptr,
+			.timelineSemaphore = VK_TRUE
+		};
+
 		auto dev_builder = vkb::DeviceBuilder{ ctx.vkb_physical_device_ };
+		dev_builder.add_pNext(&features12);
 		if (ctx.dynamic_rendering_khr_)
 		{
 			dev_builder.add_pNext(&dynamic_rendering_khr);
@@ -477,7 +725,9 @@ private:
 		allocatorInfo.device = ctx.vkb_device_.device;
 		allocatorInfo.instance = ctx.vkb_instance_.instance;
 		allocatorInfo.pVulkanFunctions = &vulkanFunctions;
-		allocatorInfo.vulkanApiVersion = VK_API_VERSION_1_3;
+		// The negotiated version, not a hardcoded one: telling VMA 1.3 on the
+		// 1.2+KHR path would let it call entry points the device never promised.
+		allocatorInfo.vulkanApiVersion = ctx.negotiated_api_version_;
 
 		if (auto e = check(vmaCreateAllocator(&allocatorInfo, &ctx.allocator_),
 		                   "create VMA allocator"))
@@ -495,6 +745,26 @@ private:
 		if (auto e = check(vkCreateCommandPool(ctx.vkb_device_.device, &poolInfo,
 		                                       nullptr, &ctx.command_pool_),
 		                   "create command pool"))
+		{
+			return std::unexpected(*e);
+		}
+
+		// The submission timeline (see submit_timeline() above). Core 1.2; the
+		// feature bit was enabled in create_device_.
+		VkSemaphoreTypeCreateInfo timelineType{
+			.sType = VK_STRUCTURE_TYPE_SEMAPHORE_TYPE_CREATE_INFO,
+			.pNext = nullptr,
+			.semaphoreType = VK_SEMAPHORE_TYPE_TIMELINE,
+			.initialValue = 0
+		};
+		VkSemaphoreCreateInfo timelineInfo{
+			.sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO,
+			.pNext = &timelineType,
+			.flags = 0
+		};
+		if (auto e = check(vkCreateSemaphore(ctx.vkb_device_.device, &timelineInfo,
+		                                     nullptr, &ctx.submit_timeline_),
+		                   "create submission timeline semaphore"))
 		{
 			return std::unexpected(*e);
 		}
@@ -555,6 +825,7 @@ private:
 
 	VkQueue graphics_queue_ = VK_NULL_HANDLE;
 	std::uint32_t graphics_queue_family_ = 0;
+	std::mutex queue_mutex_;
 
 	VmaAllocator allocator_ = VK_NULL_HANDLE;
 	VkCommandPool command_pool_ = VK_NULL_HANDLE;
@@ -571,5 +842,15 @@ private:
 	// Set by configure_features_: 1.3 on the core path, 1.2 on the KHR path.
 	std::uint32_t negotiated_api_version_ = VK_API_VERSION_1_2;
 
-	std::uint32_t current_frame_ = 0;
+	std::uint32_t frames_in_flight_ = 2;
+	std::uint64_t frame_serial_ = 0;
+
+	VkSemaphore submit_timeline_ = VK_NULL_HANDLE;
+	std::atomic<std::uint64_t> submit_serial_{ 0 };
+
+	std::mutex deletion_mutex_;
+	std::deque<std::pair<std::uint64_t, std::function<void()>>> deletion_queue_;
+
+	std::unordered_map<std::uint32_t, std::shared_ptr<Sampler>> sampler_cache_;
+	std::unique_ptr<UploadManagerBase> upload_manager_;
 };

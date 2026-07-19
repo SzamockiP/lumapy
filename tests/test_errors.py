@@ -50,9 +50,9 @@ def test_missing_shader_file_is_a_resource_error_not_a_shader_error(ctx):
         ctx.compile_shader("does_not_exist.frag", bz.ShaderStage.VERTEX)
 
 
-def test_missing_texture_reports_why(ctx):
+def test_missing_image_reports_why(ctx):
     with pytest.raises(bz.ResourceError) as info:
-        ctx.load_texture("no_such_image.png")
+        ctx.load_image("no_such_image.png")
     # stb knows whether it was missing or corrupt; the message should say.
     assert "no_such_image.png" in str(info.value)
 
@@ -128,7 +128,7 @@ def test_set_buffer_on_nonexistent_binding_is_a_resource_error(ctx, triangle_sha
     assert "5" in str(info.value)
 
 
-def test_set_buffer_on_texture_binding_points_to_set_texture(ctx, triangle_shaders):
+def test_set_buffer_on_image_binding_points_to_set_image(ctx, triangle_shaders):
     vert, frag = triangle_shaders
     target = bz.RenderTarget(ctx, 16, 16)
     pipeline = (ctx.pipeline_builder()
@@ -143,7 +143,7 @@ def test_set_buffer_on_texture_binding_points_to_set_texture(ctx, triangle_shade
 
     with pytest.raises(bz.ResourceError) as info:
         dset.set_buffer(0, ubuf)
-    assert "set_texture" in str(info.value)
+    assert "set_image" in str(info.value)
 
 
 def test_dynamic_buffer_in_static_set_is_a_resource_error(ctx, triangle_shaders):

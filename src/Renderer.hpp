@@ -6,6 +6,7 @@
 #include <expected>
 #include <format>
 #include <memory>
+#include <mutex>
 #include <vector>
 #include <string>
 #include <algorithm>
@@ -142,7 +143,9 @@ public:
 			.flags = VK_FENCE_CREATE_SIGNALED_BIT
 		};
 
-		for (size_t i = 0; i < Context::MAX_FRAMES_IN_FLIGHT; i++)
+		renderer->image_available_semaphores_.resize(context->frames_in_flight(), VK_NULL_HANDLE);
+		renderer->in_flight_fences_.resize(context->frames_in_flight(), VK_NULL_HANDLE);
+		for (size_t i = 0; i < context->frames_in_flight(); i++)
 		{
 			if (auto e = check(vkCreateSemaphore(context->device(), &semaphoreInfo, nullptr, &renderer->image_available_semaphores_[i]),
 			                   "create image available semaphore"))
@@ -187,10 +190,11 @@ public:
 
 		if (context_->device())
 		{
+			std::lock_guard lock(context_->queue_mutex());
 			vkDeviceWaitIdle(context_->device());
 		}
 
-		for (size_t i = 0; i < Context::MAX_FRAMES_IN_FLIGHT; ++i)
+		for (size_t i = 0; i < image_available_semaphores_.size(); ++i)
 		{
 			if (image_available_semaphores_[i]) vkDestroySemaphore(context_->device(), image_available_semaphores_[i], nullptr);
 			if (in_flight_fences_[i]) vkDestroyFence(context_->device(), in_flight_fences_[i], nullptr);
@@ -251,17 +255,25 @@ public:
 	// The one line that used to be hardcoded inside every end_rendering.
 	VkImageLayout final_layout() const override { return VK_IMAGE_LAYOUT_PRESENT_SRC_KHR; }
 
-	std::uint32_t current_frame() const { return context_->current_frame(); }
+	std::uint32_t current_frame() const { return context_->frame_index(); }
+	std::uint64_t current_serial() const { return context_->frame_serial(); }
 	std::uint32_t current_image_index() const { return image_index_; }
 	bool frame_skipped() const { return frame_skipped_; }
 
-	void submit(std::shared_ptr<CommandBuffer> cmd);
+	void submit(std::shared_ptr<CommandBuffer> cmd, std::uint64_t upload_wait_serial = 0);
 
 	// Returns true if a frame was successfully acquired and is ready for rendering.
 	// Returns false if the frame was skipped (minimized, resize, etc.) — caller should skip rendering.
 	bool begin_frame()
 	{
 		frame_skipped_ = false;
+
+		// The frame ring advances at the START of a frame, on the Context — not
+		// at the end, on the renderer, as it used to. Everything below indexes
+		// per-frame state through current_frame(), so consistency within one
+		// frame is all that matters. A skipped frame burns a ring slot, which is
+		// harmless: nothing gets submitted under it.
+		context_->advance_frame();
 
 		// Check framebuffer size — return false if minimized (0x0)
 		auto [width, height] = surface_provider_.get_framebuffer_size();
@@ -271,6 +283,10 @@ public:
 		}
 
 		vkWaitForFences(context_->device(), 1, &in_flight_fences_[current_frame()], VK_TRUE, UINT64_MAX);
+
+		// A frame boundary is the natural point to reclaim deferred handles;
+		// the submission timeline says how far the GPU actually got.
+		context_->flush_deletion_queue();
 
 		VkResult result = vkAcquireNextImageKHR(
 			context_->device(),
@@ -296,30 +312,20 @@ public:
 		return true;
 	}
 
-	void end_frame(VkCommandBuffer cmd)
+	// upload_wait_serial: the highest submission-timeline value this frame's
+	// resources depend on (async uploads). 0 waits for nothing — a timeline
+	// wait for 0 is trivially satisfied, so no branching is needed.
+	void end_frame(VkCommandBuffer cmd, std::uint64_t upload_wait_serial = 0)
 	{
-		VkSemaphore waitSemaphores[] = { image_available_semaphores_[current_frame()] };
-		VkPipelineStageFlags waitStages[] = { VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT };
-		VkSemaphore signalSemaphores[] = { render_finished_semaphores_[image_index_] };
+		VkSemaphore waitSemaphores[] = { image_available_semaphores_[current_frame()],
+		                                 context_->submit_timeline() };
+		VkPipelineStageFlags waitStages[] = { VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+		                                      VK_PIPELINE_STAGE_ALL_COMMANDS_BIT };
+		std::uint64_t waitValues[] = { 0, upload_wait_serial };  // binary sem value ignored
+
+		VkSemaphore signalSemaphores[] = { render_finished_semaphores_[image_index_],
+		                                   context_->submit_timeline() };
 		VkSwapchainKHR swapchains[] = { swapchain_ };
-
-		VkSubmitInfo submitInfo{
-			.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO,
-			.pNext = nullptr,
-			.waitSemaphoreCount = 1,
-			.pWaitSemaphores = waitSemaphores,
-			.pWaitDstStageMask = waitStages,
-			.commandBufferCount = 1,
-			.pCommandBuffers = &cmd,
-			.signalSemaphoreCount = 1,
-			.pSignalSemaphores = signalSemaphores
-		};
-
-		if (VkResult submit_result = vkQueueSubmit(context_->graphics_queue(), 1, &submitInfo, in_flight_fences_[current_frame()]);
-		    submit_result != VK_SUCCESS) {
-			if (auto l = context_->logger()) l->log(Severity::Error, Source::Device,
-				std::format("Failed to submit draw command buffer ({})", vk_result_name(submit_result)));
-		}
 
 		VkPresentInfoKHR presentInfo{
 			.sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR,
@@ -332,13 +338,49 @@ public:
 			.pResults = nullptr
 		};
 
-		VkResult result = vkQueuePresentKHR(present_queue_, &presentInfo);
+		// The lock ends before recreate_swapchain below: that path takes the
+		// device idle, which must not happen while holding the queue mutex.
+		VkResult result;
+		{
+			std::lock_guard lock(context_->queue_mutex());
+
+			// Every submit signals the timeline; the serial is reserved under
+			// the same lock that orders the submits.
+			std::uint64_t signalValues[] = { 0, context_->advance_submit_serial() };
+
+			VkTimelineSemaphoreSubmitInfo timelineInfo{
+				.sType = VK_STRUCTURE_TYPE_TIMELINE_SEMAPHORE_SUBMIT_INFO,
+				.pNext = nullptr,
+				.waitSemaphoreValueCount = 2,
+				.pWaitSemaphoreValues = waitValues,
+				.signalSemaphoreValueCount = 2,
+				.pSignalSemaphoreValues = signalValues
+			};
+
+			VkSubmitInfo submitInfo{
+				.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO,
+				.pNext = &timelineInfo,
+				.waitSemaphoreCount = 2,
+				.pWaitSemaphores = waitSemaphores,
+				.pWaitDstStageMask = waitStages,
+				.commandBufferCount = 1,
+				.pCommandBuffers = &cmd,
+				.signalSemaphoreCount = 2,
+				.pSignalSemaphores = signalSemaphores
+			};
+
+			if (VkResult submit_result = vkQueueSubmit(context_->graphics_queue(), 1, &submitInfo, in_flight_fences_[current_frame()]);
+			    submit_result != VK_SUCCESS) {
+				if (auto l = context_->logger()) l->log(Severity::Error, Source::Device,
+					std::format("Failed to submit draw command buffer ({})", vk_result_name(submit_result)));
+			}
+
+			result = vkQueuePresentKHR(present_queue_, &presentInfo);
+		}
 
 		if (result == VK_ERROR_OUT_OF_DATE_KHR || result == VK_SUBOPTIMAL_KHR || surface_provider_.consume_resize_flag()) {
 			recreate_swapchain();
 		}
-
-		context_->set_current_frame((current_frame() + 1) % Context::MAX_FRAMES_IN_FLIGHT);
 	}
 
 private:
@@ -358,9 +400,9 @@ private:
 	std::vector<VkImage> swapchain_images_;
 	std::vector<VkImageView> swapchain_image_views_;
 
-	VkSemaphore image_available_semaphores_[Context::MAX_FRAMES_IN_FLIGHT]{};
+	std::vector<VkSemaphore> image_available_semaphores_;
 	std::vector<VkSemaphore> render_finished_semaphores_;
-	VkFence in_flight_fences_[Context::MAX_FRAMES_IN_FLIGHT]{};
+	std::vector<VkFence> in_flight_fences_;
 
 	std::uint32_t image_index_ = 0;
 
@@ -467,7 +509,10 @@ private:
 
 	void recreate_swapchain()
 	{
-		vkDeviceWaitIdle(context_->device());
+		{
+			std::lock_guard lock(context_->queue_mutex());
+			vkDeviceWaitIdle(context_->device());
+		}
 
 		// Destroy old depth resources
 		if (depth_image_view_) {
@@ -593,4 +638,22 @@ private:
 
 		return {};
 	}
+};
+// One successfully acquired swapchain frame. begin_frame() hands this out
+// instead of a bool: "a frame exists" and "here is the frame" are the same
+// fact, and putting submit() on the frame makes submitting without having
+// acquired one unrepresentable.
+//
+// The serial is a generation guard: a Frame held across ticks (the obvious
+// PyQt mistake) fails with a readable error instead of a validation storm.
+struct Frame
+{
+	std::shared_ptr<SwapchainRenderer> renderer;
+	std::uint64_t serial = 0;
+	std::uint32_t frame_index = 0;
+	std::uint32_t image_index = 0;
+	bool submitted = false;
+
+	// Records, submits and presents. Defined in main.cpp next to record_frame.
+	std::expected<void, Error> submit(std::shared_ptr<CommandBuffer> cmd);
 };
