@@ -57,7 +57,9 @@ def test_renamed_and_new_api_is_declared():
                      # 0.6
                      "class GraphicsPipelineBuilder:", "class ComputePipelineBuilder:",
                      "def graphics_pipeline", "def compute_pipeline",
-                     "class Topology(", "def topology"):
+                     "class Topology(", "def topology",
+                     "class Access(", "def dispatch", "def barrier",
+                     "auto_barriers"):
         assert expected in text, f"{expected!r} missing from _core.pyi"
 
 

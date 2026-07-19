@@ -18,7 +18,9 @@ and the Vulkan SDK.
 
 - **Modern Graphics API:** Built on top of Vulkan for optimal hardware utilization.
 - **Easy to Use Interface:** Write clear and concise code with an intuitive API.
-- **Automatic Shader Compilation:** Compile GLSL shaders (Vertex/Fragment) directly from your code.
+- **Automatic Shader Compilation:** Compile GLSL shaders (Vertex/Fragment/Compute) directly from your code.
+- **Compute Pipelines:** `ctx.compute_pipeline()` + `cmd.dispatch()` — run GPU compute with results straight back into NumPy, no images required.
+- **Automatic Barriers:** Hazards between resources (dispatch → dispatch, compute-written buffer → vertex fetch) get their barriers computed at record time. `Context(auto_barriers=False)` hands you full manual control via `cmd.barrier()`.
 - **Pipeline & Buffer Management:** Easy builder pattern for graphics pipelines and unified buffer creation.
 - **Command Buffers:** Explicit, yet simple command recording — calls chain (`cmd.bind_pipeline(p).draw(3)`), and `with cmd.rendering(target):` closes the pass for you.
 - **Asynchronous Texture Streaming:** `ctx.load_image()` returns immediately while the decode and GPU copy run in the background; anything that samples the image waits for it automatically. `ctx.upload_progress` gives you a loading bar for free.
@@ -60,6 +62,42 @@ ctx.submit(cmd)
 
 pixels = target.read_pixels()   # numpy (600, 800, 4) uint8
 ```
+
+## Quick Start: GPU Compute
+
+Compute needs no window and no images — dispatch, then read the storage
+buffer back as a NumPy array:
+
+```python
+import numpy as np
+import bazalt as bz
+
+ctx = bz.Context()
+
+# double.comp: values[i] *= 2.0 over a std430 float array, local_size_x = 64
+sim = (ctx.compute_pipeline()
+    .shader(ctx.compile_shader("double.comp", bz.ShaderStage.COMPUTE))
+    .storage_buffer(0)      # no stage argument — compute has exactly one stage
+    .build())               # no target — compute has no attachments
+
+data = np.arange(128, dtype=np.float32)
+sbuf = ctx.create_buffer(data, bz.BufferType.STORAGE, bz.MemoryUsage.STATIC)
+
+pool = ctx.create_descriptor_pool(max_sets=4, storage_buffers=4)
+dset = pool.allocate_set(sim, set=0)
+dset.set_buffer(0, sbuf)
+
+cmd = ctx.create_command_buffer()
+cmd.begin()
+cmd.bind_pipeline(sim).bind_descriptor_set(dset, sim, set=0).dispatch(128 // 64)
+ctx.submit(cmd)
+
+assert np.allclose(sbuf.read(np.float32), data * 2)
+```
+
+Compute mixes freely with rendering in one command buffer — a dispatch that
+writes vertices and a draw that consumes them need no ceremony; the barrier
+between them is recorded automatically (see `examples/11_particles`).
 
 ## Quick Start: Drawing a Triangle
 
