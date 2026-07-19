@@ -758,6 +758,11 @@ PYBIND11_MODULE(_core, m) {
             return self;
         }, py::arg("index_count"), py::arg("instance_count"),
            py::arg("first_index") = 0, py::arg("vertex_offset") = 0)
+        .def("dispatch", [](std::shared_ptr<CommandBuffer> self, uint32_t group_count_x,
+                            uint32_t group_count_y, uint32_t group_count_z) {
+            self->dispatch(group_count_x, group_count_y, group_count_z);
+            return self;
+        }, py::arg("group_count_x"), py::arg("group_count_y") = 1, py::arg("group_count_z") = 1)
         // No stage argument: the Pipeline already records which stages its push
         // constant range covers, so repeating it could only ever be wrong.
         .def("push_constants", [](std::shared_ptr<CommandBuffer> self, std::shared_ptr<Pipeline> pipeline,

@@ -34,6 +34,7 @@ def test_every_recording_method_returns_the_same_object(ctx, triangle_shaders, t
     assert cmd.set_scissor(0, 0, 16, 16) is cmd
     assert cmd.draw_indexed(3) is cmd
     assert cmd.end_rendering(target) is cmd
+    assert cmd.dispatch(1) is cmd
 
 
 def test_chained_and_statement_styles_render_identically(ctx, triangle_shaders, triangle_buffers):

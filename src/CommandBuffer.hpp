@@ -346,6 +346,13 @@ public:
         return *this;
     }
 
+    CommandBuffer& dispatch(uint32_t groupCountX, uint32_t groupCountY = 1, uint32_t groupCountZ = 1) {
+        commands_.push_back([groupCountX, groupCountY, groupCountZ](VkCommandBuffer cmd, const FrameContext&) {
+            vkCmdDispatch(cmd, groupCountX, groupCountY, groupCountZ);
+        });
+        return *this;
+    }
+
     // No stage argument: the Pipeline already knows which stages its push constant
     // range covers, so passing a mismatched one was a validation error for no gain.
     CommandBuffer& push_constants(std::shared_ptr<Pipeline> pipeline, uint32_t offset, uint32_t size, const void* data) {
