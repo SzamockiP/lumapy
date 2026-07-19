@@ -102,10 +102,18 @@ jobs:
           name: wheels-ubuntu-22.04
           path: wheelhouse
 
+      # libvulkan1 is the Vulkan LOADER — mesa-vulkan-drivers ships only the
+      # ICD, and without the loader every vkCreateInstance fails.
       - name: Install lavapipe + validation layers
         run: |
           sudo apt-get update
-          sudo apt-get install -y mesa-vulkan-drivers vulkan-validationlayers
+          sudo apt-get install -y libvulkan1 mesa-vulkan-drivers vulkan-validationlayers vulkan-tools
+
+      - name: Report the Vulkan device CI actually sees
+        env:
+          VK_ICD_FILENAMES: /usr/share/vulkan/icd.d/lvp_icd.x86_64.json
+          VK_DRIVER_FILES: /usr/share/vulkan/icd.d/lvp_icd.x86_64.json
+        run: vulkaninfo --summary
 
       - name: Install wheel + test deps
         run: pip install wheelhouse/bazalt-*-cp312-*manylinux*.whl pytest numpy
