@@ -540,6 +540,16 @@ PYBIND11_MODULE(_core, m) {
         .value("CLAMP", AddressMode::CLAMP)
         .value("MIRROR", AddressMode::MIRROR);
 
+    py::enum_<CompareOp>(m, "CompareOp")
+        .value("NEVER", CompareOp::NEVER)
+        .value("LESS", CompareOp::LESS)
+        .value("EQUAL", CompareOp::EQUAL)
+        .value("LESS_OR_EQUAL", CompareOp::LESS_OR_EQUAL)
+        .value("GREATER", CompareOp::GREATER)
+        .value("NOT_EQUAL", CompareOp::NOT_EQUAL)
+        .value("GREATER_OR_EQUAL", CompareOp::GREATER_OR_EQUAL)
+        .value("ALWAYS", CompareOp::ALWAYS);
+
     py::enum_<CullMode>(m, "CullMode")
         .value("NONE", CullMode::NONE)
         .value("BACK", CullMode::BACK)
@@ -1010,12 +1020,13 @@ PYBIND11_MODULE(_core, m) {
                 Image::create_from_pixels(self, info.ptr, width, height, *format),
                 self.logger().get()));
         }, py::arg("array"))
-        .def("create_sampler", [](Context& self, Filter filter, AddressMode address_mode, bool anisotropy) -> py::object {
+        .def("create_sampler", [](Context& self, Filter filter, AddressMode address_mode, bool anisotropy,
+                                  std::optional<CompareOp> compare) -> py::object {
             // Cached: identical descriptions return the identical object.
-            return py::cast(unwrap(self.get_sampler(SamplerDesc{ filter, address_mode, anisotropy }),
+            return py::cast(unwrap(self.get_sampler(SamplerDesc{ filter, address_mode, anisotropy, compare }),
                                    self.logger().get()));
         }, py::arg("filter") = Filter::LINEAR, py::arg("address_mode") = AddressMode::REPEAT,
-           py::arg("anisotropy") = true)
+           py::arg("anisotropy") = true, py::arg("compare") = py::none())
         .def("create_descriptor_pool", [](Context& self, uint32_t maxSets, uint32_t samplers, uint32_t uniformBuffers, uint32_t storageBuffers) -> py::object {
             return py::cast(unwrap(
                 DescriptorPool::create(self, maxSets, samplers, uniformBuffers, storageBuffers),
