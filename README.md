@@ -24,6 +24,8 @@ and the Vulkan SDK.
 - **Pipeline & Buffer Management:** Easy builder pattern for graphics pipelines and unified buffer creation.
 - **Command Buffers:** Explicit, yet simple command recording — calls chain (`cmd.bind_pipeline(p).draw(3)`), and `with cmd.rendering(target):` closes the pass for you.
 - **Asynchronous Texture Streaming:** `ctx.load_image()` returns immediately while the decode and GPU copy run in the background; anything that samples the image waits for it automatically. `ctx.upload_progress` gives you a loading bar for free.
+- **Hot Reload:** `Context(hot_reload=True)` watches the shaders (and their `#include`s) and images you loaded and applies edits live — shaders recompile and rebuild their pipelines in place, images re-upload into the same handle. A typo or a bad file is logged and the last good version keeps rendering, so a mistake never takes the app down. See `examples/12_hot_reload`.
+- **Frame Timing & Debug Names:** `frame.gpu_time_ms` reports the GPU time of a recent frame; `name=` / `.name()` label buffers, images and pipelines so validation messages name the culprit.
 - **Headless Rendering:** Draw into an offscreen `RenderTarget` and read the pixels back as a NumPy array — no window, no display required.
 - **Render-to-Texture, MRT & Shadow Maps:** Target attachments are ordinary `Image` objects in any supported `Format` — sample `target.color[0]` or a depth-only target's `target.depth` like any texture.
 - **Runs Widely:** Vulkan 1.2 baseline with 1.3 used where available, so bazalt runs on older integrated GPUs too. Capabilities are requested by name, never by version or extension.
@@ -98,6 +100,30 @@ assert np.allclose(sbuf.read(np.float32), data * 2)
 Compute mixes freely with rendering in one command buffer — a dispatch that
 writes vertices and a draw that consumes them need no ceremony; the barrier
 between them is recorded automatically (see `examples/11_particles`).
+
+## Quick Start: Hot Reload
+
+Add one keyword and bazalt watches the files it loaded — shaders (and their
+`#include`s) and images — recompiling and re-uploading on save:
+
+```python
+ctx = bz.Context(logger, hot_reload=True)
+
+vert = ctx.compile_shader("shader.vert", bz.ShaderStage.VERTEX)
+frag = ctx.compile_shader("shader.frag", bz.ShaderStage.FRAGMENT)
+tex  = ctx.load_image("wall.png")
+pipeline = ctx.graphics_pipeline().vertex_shader(vert).fragment_shader(frag)...build(renderer)
+
+while window.is_open():
+    window.poll_events()
+    if frame := renderer.begin_frame():   # edits are applied here (and at ctx.submit)
+        frame.submit(cmd)                 # ...frame.gpu_time_ms gives GPU frame timing
+```
+
+Editing `shader.frag` rebuilds the pipeline in place; re-saving `wall.png` (same
+size and format) re-uploads into the same handle, so descriptor sets need no
+rewrite. A shader typo logs a `ShaderError` and the last good pipeline keeps
+rendering — a mistake never crashes the app. Full demo: `examples/12_hot_reload`.
 
 ## Quick Start: Drawing a Triangle
 

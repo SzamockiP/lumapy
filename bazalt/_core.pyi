@@ -373,9 +373,16 @@ class GraphicsPipelineBuilder:
     def uniform_buffer(self, binding: int, stage: ShaderStage, set: int) -> GraphicsPipelineBuilder: ...
     def storage_buffer(self, binding: int, stage: ShaderStage, set: int) -> GraphicsPipelineBuilder: ...
     def texture(self, binding: int, stage: ShaderStage, set: int) -> GraphicsPipelineBuilder: ...
+    def name(self, name: str) -> GraphicsPipelineBuilder:
+        """Debug name for the VkPipeline (validation diagnostics). No-op without
+        VK_EXT_debug_utils, i.e. when validation is off."""
+        ...
 
     def build(self, target: RenderTargetBase) -> Pipeline:
-        """Build against any render target — a window or an offscreen image."""
+        """Build against any render target — a window or an offscreen image.
+
+        The built Pipeline keeps its ShaderModules alive so hot reload can
+        rebuild it in place."""
         ...
 
 class ComputePipelineBuilder:
@@ -385,6 +392,9 @@ class ComputePipelineBuilder:
     def uniform_buffer(self, binding: int, set: int = 0) -> ComputePipelineBuilder: ...
     def storage_buffer(self, binding: int, set: int = 0) -> ComputePipelineBuilder: ...
     def push_constant(self, size: int) -> ComputePipelineBuilder: ...
+    def name(self, name: str) -> ComputePipelineBuilder:
+        """Debug name for the VkPipeline; no-op without VK_EXT_debug_utils."""
+        ...
 
     def build(self) -> Pipeline:
         """No target — compute has no attachments."""
@@ -489,7 +499,8 @@ class Context:
                  features: Sequence[Feature] = (), optional: Sequence[Feature] = (),
                  frames_in_flight: int = 2,
                  raw_extensions: Sequence[str] = (),
-                 auto_barriers: bool = True) -> None:
+                 auto_barriers: bool = True,
+                 hot_reload: bool = False) -> None:
         """
         Args:
             logger: defaults to one printing warnings to stderr.
@@ -506,6 +517,13 @@ class Context:
                 dispatch -> dispatch) are computed automatically at record time.
                 False makes every one of them your job via cmd.barrier().
                 Attachment layout transitions stay automatic either way.
+            hot_reload: watch the files you loaded — shaders (and their
+                #includes) and images — and apply edits live. A changed shader
+                recompiles and rebuilds its pipelines in place; a changed image
+                re-uploads into the same handle (same size and format only). A
+                bad edit (typo, wrong size, corrupt file) is logged and the last
+                good version keeps rendering — a mistake never kills the app.
+                Changes apply at begin_frame() and at ctx.submit().
         """
         ...
 
@@ -528,10 +546,11 @@ class Context:
     def supports(self, feature: Feature) -> bool: ...
 
     def create_buffer(self, list: list, type: BufferType, usage: MemoryUsage,
-                      data_type: Optional[DataType] = None) -> Buffer: ...
-    def create_buffer(self, array: Any, type: BufferType, usage: MemoryUsage) -> Buffer: ...
+                      data_type: Optional[DataType] = None, *, name: str = "") -> Buffer: ...
+    def create_buffer(self, array: Any, type: BufferType, usage: MemoryUsage,
+                      *, name: str = "") -> Buffer: ...
     def create_buffer(self, size_in_bytes: int, type: BufferType,
-                      usage: MemoryUsage) -> Buffer: ...
+                      usage: MemoryUsage, *, name: str = "") -> Buffer: ...
 
     def graphics_pipeline(self) -> GraphicsPipelineBuilder: ...
     def compute_pipeline(self) -> ComputePipelineBuilder: ...
@@ -560,7 +579,7 @@ class Context:
         """
         ...
 
-    def load_image(self, path: str) -> Image:
+    def load_image(self, path: str, *, name: str = "") -> Image:
         """Decode an image file into an sRGB GPU image with a full mip chain.
 
         Returns IMMEDIATELY: the file header is validated here (a missing or
@@ -569,6 +588,12 @@ class Context:
         recording right away — a submit that samples it waits for the upload
         automatically. `img.ready`, `img.wait()` and `ctx.wait_for_uploads()`
         are the explicit-control verbs.
+
+        With hot_reload=True the file is watched: re-saving it re-uploads into
+        this same image (same size and format only; a resize or corrupt file
+        logs a warning and keeps the old contents).
+
+        `name` attaches a debug name to the VkImage (no-op without validation).
         """
         ...
 
@@ -589,8 +614,8 @@ class Context:
         """Block until every pending load_image upload has finished."""
         ...
     def create_image(self, width: int, height: int,
-                     format: Format = Format.RGBA8) -> Image: ...
-    def create_image(self, array: Any) -> Image:
+                     format: Format = Format.RGBA8, *, name: str = "") -> Image: ...
+    def create_image(self, array: Any, *, name: str = "") -> Image:
         """From a numpy array; shape + dtype pick the format (UNORM — arrays
         are data, files are pictures). (h, w, 3) has no portable GPU format
         and raises ResourceError with a padding hint.
@@ -670,6 +695,13 @@ class Frame:
 
     @property
     def frame_index(self) -> int: ...
+    @property
+    def gpu_time_ms(self) -> Optional[float]:
+        """GPU time in milliseconds of the frame submitted frames_in_flight ago
+        (a timestamp pair around each submit, read back once its fence signals).
+        None until the ring has cycled once, and on devices without timestamp
+        support."""
+        ...
 
 # ── Keyboard Constants ─────────────────────────────────────────────────
 
