@@ -9,6 +9,7 @@
 #include <expected>
 #include <optional>
 #include <filesystem>
+#include <algorithm>
 #include <cctype>
 
 #include "Context.hpp"
@@ -98,6 +99,69 @@ private:
     std::vector<uint32_t> spirv_;
 };
 
+// Resolves #include relative to the directory of the INCLUDING file (both "..."
+// and <...> forms — one rule, applied recursively: an include inside an include
+// resolves against the inner file's directory) and records every file it hands
+// out, absolute and normalized, so the 0.8 hot-reload watcher can watch them.
+// One instance serves exactly one compile() call on the caller's thread, hence
+// no locking — the 0.8 watcher must keep recompilation on the main thread.
+class RecordingIncluder final : public shaderc::CompileOptions::IncluderInterface {
+public:
+    shaderc_include_result* GetInclude(const char* requested_source,
+                                       shaderc_include_type /*type*/,
+                                       const char* requesting_source,
+                                       size_t /*include_depth*/) override {
+        namespace fs = std::filesystem;
+        fs::path raw = fs::path(requesting_source).parent_path() / requested_source;
+        std::error_code ec;
+        fs::path resolved = fs::weakly_canonical(raw, ec);
+        if (ec) {
+            resolved = raw;
+        }
+
+        // Each result gets its own heap Holder: shaderc may hold several results
+        // at once, and every one must stay valid until its ReleaseInclude.
+        auto* holder = new Holder{};
+
+        std::ifstream file(resolved, std::ios::ate | std::ios::binary);
+        if (!file.is_open()) {
+            // shaderc convention: empty source_name marks failure, content
+            // carries the error message.
+            holder->content = "Cannot open include file: " + resolved.generic_string();
+            holder->result = {"", 0, holder->content.c_str(), holder->content.size(), holder};
+            return &holder->result;
+        }
+
+        size_t size = static_cast<size_t>(file.tellg());
+        holder->content.resize(size);
+        file.seekg(0);
+        file.read(holder->content.data(), size);
+        holder->name = resolved.generic_string();
+        holder->result = {holder->name.c_str(), holder->name.size(),
+                          holder->content.c_str(), holder->content.size(), holder};
+
+        if (!std::ranges::contains(included_, holder->name)) {
+            included_.push_back(holder->name);
+        }
+        return &holder->result;
+    }
+
+    void ReleaseInclude(shaderc_include_result* result) override {
+        delete static_cast<Holder*>(result->user_data);
+    }
+
+    const std::vector<std::string>& included() const { return included_; }
+
+private:
+    struct Holder {
+        std::string name;
+        std::string content;
+        shaderc_include_result result{};
+    };
+
+    std::vector<std::string> included_;
+};
+
 class ShaderCompiler {
 public:
     // One entry point for every shader form. The extension of `path` decides how
@@ -148,18 +212,25 @@ private:
         options.SetTargetEnvironment(shaderc_target_env_vulkan, env_version);
         options.SetOptimizationLevel(shaderc_optimization_level_performance);
 
+        // Keep a raw pointer before the unique_ptr moves into options; the
+        // recorded includes are read back only while `options` is alive.
+        auto includer = std::make_unique<RecordingIncluder>();
+        RecordingIncluder* recorder = includer.get();
+        options.SetIncluder(std::move(includer));
+
         shaderc_shader_kind kind = to_shaderc_kind(stage);
 
         shaderc::SpvCompilationResult module = compiler.CompileGlslToSpv(text, kind, path.c_str(), options);
 
         if (module.GetCompilationStatus() != shaderc_compilation_status_success) {
             std::string log = module.GetErrorMessage();
+            auto loc = parse_error_location(log);
             return std::unexpected(err_shader("Shader compilation failed: " + log,
-                                              path, parse_error_line(log)));
+                                              loc.path.empty() ? path : loc.path, loc.line));
         }
 
         std::vector<uint32_t> spirv(module.cbegin(), module.cend());
-        return make_module(context, std::move(spirv), path, {});
+        return make_module(context, std::move(spirv), path, recorder->included());
     }
 
     static std::expected<std::shared_ptr<ShaderModule>, Error> make_module(
@@ -183,10 +254,20 @@ private:
                                               std::move(includes), std::move(spirv));
     }
 
+    struct ErrorLocation {
+        std::string path;   // empty when the log didn't match — caller falls back
+        int line = -1;      // -1 when unknown; honest beats a wrong guess
+    };
+
     // shaderc formats diagnostics as "<name>:<line>: error: ...", so the first
-    // ":<digits>:" is the line. Returns -1 when the message doesn't match, which
-    // is honest — better than guessing a wrong line number.
-    static int parse_error_line(const std::string& log) {
+    // ":<digits>:" is the line, and the name is everything from the start of
+    // that LOG LINE (after the previous '\n', not the start of the whole log —
+    // earlier diagnostics would otherwise be swallowed into the name). With the
+    // includer active the name may be an INCLUDED file: exactly what
+    // ShaderError.path should say, so the user — and the 0.8 watcher — opens
+    // the file the error is actually in. Windows drive colons ("C:/x.frag:12:")
+    // are safe: a ':' followed by a non-digit just keeps the scan moving.
+    static ErrorLocation parse_error_location(const std::string& log) {
         for (std::size_t i = 0; i + 1 < log.size(); ++i) {
             if (log[i] != ':') {
                 continue;
@@ -198,13 +279,18 @@ private:
             }
 
             if (j > i + 1 && j < log.size() && log[j] == ':') {
+                ErrorLocation loc;
                 try {
-                    return std::stoi(log.substr(i + 1, j - i - 1));
+                    loc.line = std::stoi(log.substr(i + 1, j - i - 1));
                 } catch (const std::exception&) {
-                    return -1;
+                    return {};
                 }
+                std::size_t start = log.rfind('\n', i);
+                start = (start == std::string::npos) ? 0 : start + 1;
+                loc.path = log.substr(start, i - start);
+                return loc;
             }
         }
-        return -1;
+        return {};
     }
 };
