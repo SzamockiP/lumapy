@@ -15,6 +15,14 @@ class DescriptorPool;
 
 class DescriptorSet {
 public:
+    // The descriptor type rides along so the ResourceTracker can tell a
+    // storage buffer (read-write in compute) from a uniform one at dispatch
+    // and draw time.
+    struct BoundBuffer {
+        std::shared_ptr<Buffer> buffer;
+        VkDescriptorType type;
+    };
+
     // sets: 1 element (static) or frames_in_flight elements (frame)
     DescriptorSet(std::shared_ptr<Context> context, std::shared_ptr<DescriptorPool> pool,
                   std::vector<VkDescriptorSet> sets,
@@ -136,7 +144,7 @@ public:
             };
             vkUpdateDescriptorSets(context_->device(), 1, &write, 0, nullptr);
         }
-        buffers_.push_back(buffer);
+        buffers_.push_back({ std::move(buffer), descType });
         return {};
     }
 
@@ -154,6 +162,10 @@ public:
     // residency.
     const std::vector<std::shared_ptr<Image>>& images() const { return images_; }
 
+    // The buffers this set references — walked at record time by the
+    // ResourceTracker to compute automatic barriers.
+    const std::vector<BoundBuffer>& buffers() const { return buffers_; }
+
 private:
     std::shared_ptr<Context> context_;
     std::shared_ptr<DescriptorPool> pool_;  // sets must not outlive their pool
@@ -163,7 +175,7 @@ private:
     // Hold shared_ptrs to prevent resources from being freed
     std::vector<std::shared_ptr<Image>> images_;
     std::vector<std::shared_ptr<Sampler>> samplers_;
-    std::vector<std::shared_ptr<Buffer>> buffers_;
+    std::vector<BoundBuffer> buffers_;
 };
 
 class DescriptorPool : public std::enable_shared_from_this<DescriptorPool> {

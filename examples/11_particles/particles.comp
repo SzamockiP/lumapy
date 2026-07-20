@@ -1,0 +1,37 @@
+#version 450
+layout(local_size_x = 64) in;
+
+struct Particle {
+    vec2 pos;
+    vec2 vel;
+};
+
+layout(std430, set = 0, binding = 0) buffer Particles {
+    Particle particles[];
+};
+
+layout(push_constant) uniform Push {
+    float dt;
+};
+
+void main() {
+    uint i = gl_GlobalInvocationID.x;
+    if (i >= particles.length()) {
+        return;
+    }
+
+    Particle p = particles[i];
+    p.pos += p.vel * dt;
+
+    // Bounce off the screen edges.
+    if (abs(p.pos.x) > 1.0) {
+        p.vel.x = -p.vel.x;
+        p.pos.x = clamp(p.pos.x, -1.0, 1.0);
+    }
+    if (abs(p.pos.y) > 1.0) {
+        p.vel.y = -p.vel.y;
+        p.pos.y = clamp(p.pos.y, -1.0, 1.0);
+    }
+
+    particles[i] = p;
+}

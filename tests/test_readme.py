@@ -16,7 +16,7 @@ def test_readme_headless_quickstart(ctx):
     """Kept in step with the 'Rendering Without a Window' section of README.md."""
     target = bz.RenderTarget(ctx, 800, 600, depth=bz.Format.D32F)
 
-    pipeline = (ctx.pipeline_builder()
+    pipeline = (ctx.graphics_pipeline()
                 .vertex_shader(ctx.compile_shader(str(SHADER_DIR / "triangle.vert"),
                                                   bz.ShaderStage.VERTEX))
                 .fragment_shader(ctx.compile_shader(str(SHADER_DIR / "triangle.frag"),
@@ -42,3 +42,26 @@ def test_readme_headless_quickstart(ctx):
     assert pixels.dtype == np.uint8
     # Something was actually drawn, not just cleared.
     assert not np.allclose(pixels[300, 400, :3], np.array([26, 51, 77]), atol=2)
+
+
+def test_readme_compute_quickstart(ctx):
+    """Kept in step with the 'GPU Compute' section of README.md."""
+    sim = (ctx.compute_pipeline()
+           .shader(ctx.compile_shader(str(SHADER_DIR / "double.comp"),
+                                      bz.ShaderStage.COMPUTE))
+           .storage_buffer(0)
+           .build())
+
+    data = np.arange(128, dtype=np.float32)
+    sbuf = ctx.create_buffer(data, bz.BufferType.STORAGE, bz.MemoryUsage.STATIC)
+
+    pool = ctx.create_descriptor_pool(max_sets=4, storage_buffers=4)
+    dset = pool.allocate_set(sim, set=0)
+    dset.set_buffer(0, sbuf)
+
+    cmd = ctx.create_command_buffer()
+    cmd.begin()
+    cmd.bind_pipeline(sim).bind_descriptor_set(dset, sim, set=0).dispatch(128 // 64)
+    ctx.submit(cmd)
+
+    assert np.allclose(sbuf.read(np.float32), data * 2)

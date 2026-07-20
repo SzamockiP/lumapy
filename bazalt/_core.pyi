@@ -121,6 +121,7 @@ class DataType(IntEnum):
 class ShaderStage(IntEnum):
     VERTEX = 0
     FRAGMENT = 1
+    COMPUTE = 2
 
 class VertexFormat(IntEnum):
     """Vertex attribute layout. Renamed from `Format`, which is reserved for
@@ -128,6 +129,21 @@ class VertexFormat(IntEnum):
     FLOAT2 = 0
     FLOAT3 = 1
     FLOAT4 = 2
+
+class Topology(IntEnum):
+    """Primitive topology for graphics pipelines. TRIANGLE_LIST is the default."""
+    TRIANGLE_LIST = 0
+    POINT_LIST = 1
+    LINE_LIST = 2
+
+class Access(IntEnum):
+    """What a command does to a buffer — the vocabulary of cmd.barrier()
+    in manual mode (auto_barriers=False)."""
+    SHADER_READ = 0
+    SHADER_WRITE = 1
+    VERTEX_READ = 2
+    INDEX_READ = 3
+    UNIFORM_READ = 4
 
 class Format(IntEnum):
     """Pixel formats.
@@ -303,20 +319,33 @@ class RenderTarget(RenderTargetBase):
         """
         ...
 
-class PipelineBuilder:
-    def vertex_shader(self, shader: ShaderModule) -> PipelineBuilder: ...
-    def fragment_shader(self, shader: ShaderModule) -> PipelineBuilder: ...
-    def vertex_format(self, formats: list[VertexFormat]) -> PipelineBuilder: ...
-    def depth_test(self, enable: bool) -> PipelineBuilder: ...
-    def cull_mode(self, mode: CullMode, front_face: FrontFace) -> PipelineBuilder: ...
-    def blend(self, enable: bool) -> PipelineBuilder: ...
-    def push_constant(self, size: int, stage: ShaderStage) -> PipelineBuilder: ...
-    def uniform_buffer(self, binding: int, stage: ShaderStage, set: int) -> PipelineBuilder: ...
-    def storage_buffer(self, binding: int, stage: ShaderStage, set: int) -> PipelineBuilder: ...
-    def texture(self, binding: int, stage: ShaderStage, set: int) -> PipelineBuilder: ...
+class GraphicsPipelineBuilder:
+    def vertex_shader(self, shader: ShaderModule) -> GraphicsPipelineBuilder: ...
+    def fragment_shader(self, shader: ShaderModule) -> GraphicsPipelineBuilder: ...
+    def vertex_format(self, formats: list[VertexFormat]) -> GraphicsPipelineBuilder: ...
+    def depth_test(self, enable: bool) -> GraphicsPipelineBuilder: ...
+    def cull_mode(self, mode: CullMode, front_face: FrontFace) -> GraphicsPipelineBuilder: ...
+    def blend(self, enable: bool) -> GraphicsPipelineBuilder: ...
+    def topology(self, topology: Topology) -> GraphicsPipelineBuilder: ...
+    def push_constant(self, size: int, stage: ShaderStage) -> GraphicsPipelineBuilder: ...
+    def uniform_buffer(self, binding: int, stage: ShaderStage, set: int) -> GraphicsPipelineBuilder: ...
+    def storage_buffer(self, binding: int, stage: ShaderStage, set: int) -> GraphicsPipelineBuilder: ...
+    def texture(self, binding: int, stage: ShaderStage, set: int) -> GraphicsPipelineBuilder: ...
 
     def build(self, target: RenderTargetBase) -> Pipeline:
         """Build against any render target — a window or an offscreen image."""
+        ...
+
+class ComputePipelineBuilder:
+    """No stage arguments anywhere: compute has exactly one stage."""
+
+    def shader(self, shader: ShaderModule) -> ComputePipelineBuilder: ...
+    def uniform_buffer(self, binding: int, set: int = 0) -> ComputePipelineBuilder: ...
+    def storage_buffer(self, binding: int, set: int = 0) -> ComputePipelineBuilder: ...
+    def push_constant(self, size: int) -> ComputePipelineBuilder: ...
+
+    def build(self) -> Pipeline:
+        """No target — compute has no attachments."""
         ...
 
 class CommandBuffer:
@@ -368,6 +397,14 @@ class CommandBuffer:
                      vertex_offset: int = 0) -> CommandBuffer: ...
     def draw_indexed_instanced(self, index_count: int, instance_count: int,
                                first_index: int = 0, vertex_offset: int = 0) -> CommandBuffer: ...
+    def dispatch(self, group_count_x: int, group_count_y: int = 1,
+                 group_count_z: int = 1) -> CommandBuffer: ...
+
+    def barrier(self, buffer: Buffer, src: Access, dst: Access) -> CommandBuffer:
+        """Record a buffer barrier by hand. Required between dependent uses
+        when auto_barriers=False; legal (if redundant) in auto mode. Refused
+        inside a rendering scope — record it before begin_rendering."""
+        ...
 
     def push_constants(self, pipeline: Pipeline, offset: int, data: bytes) -> CommandBuffer:
         """The Pipeline already knows which stages its range covers."""
@@ -409,17 +446,24 @@ class Context:
     def __init__(self, logger: Optional[Logger] = None, validation: str = "auto",
                  features: Sequence[Feature] = (), optional: Sequence[Feature] = (),
                  frames_in_flight: int = 2,
-                 raw_extensions: Sequence[str] = ()) -> None:
+                 raw_extensions: Sequence[str] = (),
+                 auto_barriers: bool = True) -> None:
         """
         Args:
             logger: defaults to one printing warnings to stderr.
-            validation: "auto" (on when the layers are installed), "on", or "off".
+            validation: "auto" (on when the layers are installed), "on", "off",
+                or "sync" ("on" plus synchronization validation — the only mode
+                that reports missing barriers; costly, for debugging).
             features: required. Gates GPU selection; InitializationError if absent.
             optional: enabled when present; query with `supports()`.
             frames_in_flight: how many frames may be recorded ahead of the GPU
                 (1-4). 2 is the classic latency/throughput trade-off; 1 is
                 useful for debugging.
             raw_extensions: escape hatch. You shouldn't need this.
+            auto_barriers: barriers between resources (SSBO -> vertex read,
+                dispatch -> dispatch) are computed automatically at record time.
+                False makes every one of them your job via cmd.barrier().
+                Attachment layout transitions stay automatic either way.
         """
         ...
 
@@ -427,6 +471,8 @@ class Context:
     def logger(self) -> Logger: ...
     @property
     def frames_in_flight(self) -> int: ...
+    @property
+    def auto_barriers(self) -> bool: ...
     @property
     def device_name(self) -> str: ...
     @property
@@ -445,7 +491,8 @@ class Context:
     def create_buffer(self, size_in_bytes: int, type: BufferType,
                       usage: MemoryUsage) -> Buffer: ...
 
-    def pipeline_builder(self) -> PipelineBuilder: ...
+    def graphics_pipeline(self) -> GraphicsPipelineBuilder: ...
+    def compute_pipeline(self) -> ComputePipelineBuilder: ...
     def compile_shader(self, path: str, stage: ShaderStage) -> ShaderModule: ...
 
     def load_image(self, path: str) -> Image:
@@ -491,9 +538,12 @@ class Context:
                                uniform_buffers: int = 0,
                                storage_buffers: int = 0) -> DescriptorPool: ...
 
-    def create_command_buffer(self) -> CommandBuffer:
+    def create_command_buffer(self, auto_barriers: Optional[bool] = None) -> CommandBuffer:
         """Command buffers are a device resource, so they come from the Context —
-        a headless Context has no renderer to ask."""
+        a headless Context has no renderer to ask.
+
+        auto_barriers overrides the Context-wide mode for this one command
+        buffer; None inherits it."""
         ...
 
     def submit(self, cmd: CommandBuffer) -> None:

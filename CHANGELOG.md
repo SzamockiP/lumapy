@@ -5,6 +5,64 @@ All notable changes to **bazalt** are documented here. The format follows
 [SemVer](https://semver.org/) (pre-1.0: minor versions may break the API,
 patch versions never do).
 
+## [0.6.0] — 2026-07-19
+
+"Compute": compute pipelines with automatic barriers. Compute is a
+first-class citizen — the same deferred recording, the same chaining,
+one new verb (`dispatch`) — and the barriers between a dispatch and
+whatever consumes its output are computed for you, with a fully manual
+mode when you want the wheel. First release whose GPU test suite runs
+in CI (lavapipe).
+
+### Added
+- **Compute pipelines.** `ctx.compute_pipeline().shader(comp)
+  .storage_buffer(0).push_constant(4).build()` — declarators take no
+  `stage` argument (compute has exactly one stage) and `build()` takes
+  no target (compute has no attachments). `bz.ShaderStage.COMPUTE`
+  compiles `.comp` GLSL through the existing `compile_shader`.
+- **`cmd.dispatch(gx, gy=1, gz=1)`** — chains like every other
+  recording method and mixes freely with rendering scopes in one
+  command buffer.
+- **Automatic buffer barriers** (`Context(auto_barriers=True)`, the
+  default). Hazards between recorded uses — dispatch → dispatch,
+  dispatch → draw (descriptor read or vertex fetch), draw → dispatch —
+  get their barriers computed at record time; deferred recording makes
+  them valid for every replay, including replay-to-replay ordering.
+  Barriers discovered inside a rendering scope are hoisted before it
+  (`vkCmdPipelineBarrier` is illegal inside dynamic rendering).
+  Attachment layout transitions stay automatic always — they are the
+  RenderTarget contract, not resource barriers. Known limit: SSBO
+  *writes* from graphics shaders are not tracked (no shader
+  reflection); `cmd.barrier()` covers that by hand.
+- **Manual mode**: `Context(auto_barriers=False)` or
+  `ctx.create_command_buffer(auto_barriers=False)` per command buffer;
+  `cmd.barrier(buffer, bz.Access.SHADER_WRITE, bz.Access.VERTEX_READ)`
+  with the new **`bz.Access`** enum (SHADER_READ, SHADER_WRITE,
+  VERTEX_READ, INDEX_READ, UNIFORM_READ).
+- **`validation="sync"`** — validation "on" plus synchronization
+  validation, the only mode that reports *missing* barriers. (On SDK
+  1.4.350 this also enables the layer's shader-accesses tracking,
+  without which descriptor hazards go unreported.)
+- **`.topology(bz.Topology.POINT_LIST | LINE_LIST | TRIANGLE_LIST)`**
+  on the graphics builder — the hardcoded triangle list is now just the
+  default.
+- STATIC STORAGE buffers carry VERTEX usage: a compute-written SSBO
+  feeds `bind_vertex_buffer` directly.
+- **CI runs the full GPU suite on lavapipe** (Mesa software rasterizer,
+  ubuntu-24.04) on every push — the first CI leg that actually renders.
+  Honest scope note: lavapipe there is Vulkan 1.3, so the 1.2+KHR-alias
+  path remains untested.
+- Example: `11_particles` — a compute shader integrates particles in a
+  storage buffer that doubles as the vertex buffer, drawn as points.
+- Tests: 116 → 134 (compute end-to-end on numpy asserts, barrier
+  hazards under sync validation in subprocesses, README compute
+  snippet).
+
+### Changed (breaking)
+- `ctx.pipeline_builder()` → **`ctx.graphics_pipeline()`**, class
+  `PipelineBuilder` → **`GraphicsPipelineBuilder`** — the builder split
+  is what lets compute declarators drop their `stage` arguments.
+
 ## [0.5.0] — 2026-07-19
 
 "Images & Uploads": asynchronous texture streaming, the Texture →

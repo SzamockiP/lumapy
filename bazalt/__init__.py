@@ -15,7 +15,8 @@ from bazalt._core import (  # noqa: F401 — explicit re-exports for IDE visibil
     Image,
     Sampler,
     Pipeline,
-    PipelineBuilder,
+    GraphicsPipelineBuilder,
+    ComputePipelineBuilder,
     DescriptorPool,
     DescriptorSet,
     CommandBuffer,
@@ -25,6 +26,8 @@ from bazalt._core import (  # noqa: F401 — explicit re-exports for IDE visibil
     DataType,
     ShaderStage,
     VertexFormat,
+    Topology,
+    Access,
     Format,
     Filter,
     AddressMode,
@@ -43,7 +46,7 @@ from bazalt._core import (  # noqa: F401 — explicit re-exports for IDE visibil
     ResourceError,
 )
 
-__version__ = "0.5.0"
+__version__ = "0.6.0"
 
 __all__ = [
     # Core
@@ -61,7 +64,8 @@ __all__ = [
     "Image",
     "Sampler",
     "Pipeline",
-    "PipelineBuilder",
+    "GraphicsPipelineBuilder",
+    "ComputePipelineBuilder",
     "DescriptorPool",
     "DescriptorSet",
     "CommandBuffer",
@@ -72,6 +76,8 @@ __all__ = [
     "DataType",
     "ShaderStage",
     "VertexFormat",
+    "Topology",
+    "Access",
     "Format",
     "Filter",
     "AddressMode",

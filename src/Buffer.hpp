@@ -147,7 +147,10 @@ public:
         switch (type) {
             case BufferType::VERTEX: usage |= VK_BUFFER_USAGE_VERTEX_BUFFER_BIT; break;
             case BufferType::INDEX: usage |= VK_BUFFER_USAGE_INDEX_BUFFER_BIT; break;
-            case BufferType::STORAGE: usage |= VK_BUFFER_USAGE_STORAGE_BUFFER_BIT; break;
+            // VERTEX also: a compute shader writing vertices into an SSBO that
+            // the graphics pipeline then consumes via bind_vertex_buffer is the
+            // canonical compute->graphics hand-off (examples/11_particles).
+            case BufferType::STORAGE: usage |= VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_VERTEX_BUFFER_BIT; break;
             default: break;
         }
 
