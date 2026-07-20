@@ -593,7 +593,14 @@ PYBIND11_MODULE(_core, m) {
             return out;
         }, py::arg("dtype"));
     
-    py::class_<ShaderModule, std::shared_ptr<ShaderModule>>(m, "ShaderModule");
+    py::class_<ShaderModule, std::shared_ptr<ShaderModule>>(m, "ShaderModule")
+        .def_property_readonly("path", &ShaderModule::path)
+        .def_property_readonly("includes", &ShaderModule::includes)
+        .def_property_readonly("spirv", [](const ShaderModule& self) {
+            const auto& words = self.spirv();
+            return py::bytes(reinterpret_cast<const char*>(words.data()),
+                             words.size() * sizeof(uint32_t));
+        });
 
     // Image + Sampler replace the old Texture, which fused VkImage, view and a
     // per-texture sampler into one object. Samplers are cached on the Context;
@@ -918,9 +925,11 @@ PYBIND11_MODULE(_core, m) {
         .def("compute_pipeline", [](Context& self) -> std::shared_ptr<ComputePipelineBuilder> {
             return std::make_shared<ComputePipelineBuilder>(self);
         })
-        .def("compile_shader", [](Context& self, const std::string& path, ShaderStage stage) -> py::object {
-            return py::cast(unwrap(ShaderCompiler::compile(self, path, stage), self.logger().get()));
-        }, py::arg("path"), py::arg("stage"))
+        .def("compile_shader", [](Context& self, const std::string& path, ShaderStage stage,
+                                  std::optional<std::string> source) -> py::object {
+            return py::cast(unwrap(ShaderCompiler::compile(self, path, stage, std::move(source)),
+                                   self.logger().get()));
+        }, py::arg("path"), py::arg("stage"), py::kw_only(), py::arg("source") = py::none())
         .def("load_image", [](Context& self, const std::string& path) -> py::object {
             // sRGB with a full mip chain: files are pictures. Arrays go through
             // create_image and stay UNORM: arrays are data.

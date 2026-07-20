@@ -7,6 +7,8 @@
 #include <stdexcept>
 #include <memory>
 #include <expected>
+#include <optional>
+#include <filesystem>
 #include <cctype>
 
 #include "Context.hpp"
@@ -44,8 +46,10 @@ inline constexpr shaderc_shader_kind to_shaderc_kind(ShaderStage stage) {
 
 class ShaderModule {
 public:
-    ShaderModule(std::shared_ptr<Context> context, VkShaderModule module, const std::string& path)
-        : context_(context), module_(module), path_(path) {}
+    ShaderModule(std::shared_ptr<Context> context, VkShaderModule module, const std::string& path,
+                 std::vector<std::string> includes, std::vector<uint32_t> spirv)
+        : context_(context), module_(module), path_(path),
+          includes_(std::move(includes)), spirv_(std::move(spirv)) {}
 
     ~ShaderModule() {
         destroy();
@@ -55,7 +59,8 @@ public:
     ShaderModule& operator=(const ShaderModule&) = delete;
 
     ShaderModule(ShaderModule&& other) noexcept
-        : context_(std::move(other.context_)), module_(other.module_), path_(std::move(other.path_)) {
+        : context_(std::move(other.context_)), module_(other.module_), path_(std::move(other.path_)),
+          includes_(std::move(other.includes_)), spirv_(std::move(other.spirv_)) {
         other.module_ = VK_NULL_HANDLE;
     }
 
@@ -65,6 +70,8 @@ public:
             context_ = std::move(other.context_);
             module_ = other.module_;
             path_ = std::move(other.path_);
+            includes_ = std::move(other.includes_);
+            spirv_ = std::move(other.spirv_);
             other.module_ = VK_NULL_HANDLE;
         }
         return *this;
@@ -72,6 +79,10 @@ public:
 
     VkShaderModule get() const { return module_; }
     const std::string& path() const { return path_; }
+    // Files pulled in via #include, absolute and normalized. The 0.8 hot-reload
+    // watcher watches path() plus these; empty for .spv and include-free sources.
+    const std::vector<std::string>& includes() const { return includes_; }
+    const std::vector<uint32_t>& spirv() const { return spirv_; }
 
 private:
     void destroy() {
@@ -83,23 +94,48 @@ private:
     std::shared_ptr<Context> context_;
     VkShaderModule module_;
     std::string path_;
+    std::vector<std::string> includes_;
+    std::vector<uint32_t> spirv_;
 };
 
 class ShaderCompiler {
 public:
-    static std::expected<std::shared_ptr<ShaderModule>, Error> compile(Context& context, const std::string& source_path, ShaderStage stage) {
-        std::ifstream file(source_path, std::ios::ate | std::ios::binary);
-        if (!file.is_open()) {
-            return std::unexpected(err_resource("Failed to open shader file: " + source_path));
+    // One entry point for every shader form. The extension of `path` decides how
+    // it is handled (GLSL by default); when `source` is given the file is never
+    // opened and `path` is a virtual name — it still supplies the language, the
+    // diagnostic tag, ShaderError.path, and the base directory for #include.
+    static std::expected<std::shared_ptr<ShaderModule>, Error> compile(
+            Context& context, const std::string& path, ShaderStage stage,
+            std::optional<std::string> source = std::nullopt) {
+        return compile_text(context, path, stage, std::move(source));
+    }
+
+private:
+    static std::string lowercase_extension(const std::string& path) {
+        std::string ext = std::filesystem::path(path).extension().string();
+        for (char& c : ext) {
+            c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
         }
+        return ext;
+    }
 
-        size_t fileSize = static_cast<size_t>(file.tellg());
-        std::vector<char> buffer(fileSize);
-        file.seekg(0);
-        file.read(buffer.data(), fileSize);
-        file.close();
+    static std::expected<std::shared_ptr<ShaderModule>, Error> compile_text(
+            Context& context, const std::string& path, ShaderStage stage,
+            std::optional<std::string> source) {
+        std::string text;
+        if (source) {
+            text = std::move(*source);
+        } else {
+            std::ifstream file(path, std::ios::ate | std::ios::binary);
+            if (!file.is_open()) {
+                return std::unexpected(err_resource("Failed to open shader file: " + path));
+            }
 
-        std::string source(buffer.begin(), buffer.end());
+            size_t fileSize = static_cast<size_t>(file.tellg());
+            text.resize(fileSize);
+            file.seekg(0);
+            file.read(text.data(), fileSize);
+        }
 
         shaderc::Compiler compiler;
         shaderc::CompileOptions options;
@@ -114,16 +150,21 @@ public:
 
         shaderc_shader_kind kind = to_shaderc_kind(stage);
 
-        shaderc::SpvCompilationResult module = compiler.CompileGlslToSpv(source, kind, source_path.c_str(), options);
+        shaderc::SpvCompilationResult module = compiler.CompileGlslToSpv(text, kind, path.c_str(), options);
 
         if (module.GetCompilationStatus() != shaderc_compilation_status_success) {
             std::string log = module.GetErrorMessage();
             return std::unexpected(err_shader("Shader compilation failed: " + log,
-                                              source_path, parse_error_line(log)));
+                                              path, parse_error_line(log)));
         }
 
         std::vector<uint32_t> spirv(module.cbegin(), module.cend());
+        return make_module(context, std::move(spirv), path, {});
+    }
 
+    static std::expected<std::shared_ptr<ShaderModule>, Error> make_module(
+            Context& context, std::vector<uint32_t> spirv, const std::string& path,
+            std::vector<std::string> includes) {
         VkShaderModuleCreateInfo createInfo{
             .sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO,
             .pNext = nullptr,
@@ -138,10 +179,10 @@ public:
             return std::unexpected(*e);
         }
 
-        return std::make_shared<ShaderModule>(context.shared_from_this(), vk_module, source_path);
+        return std::make_shared<ShaderModule>(context.shared_from_this(), vk_module, path,
+                                              std::move(includes), std::move(spirv));
     }
 
-private:
     // shaderc formats diagnostics as "<name>:<line>: error: ...", so the first
     // ":<digits>:" is the line. Returns -1 when the message doesn't match, which
     // is honest — better than guessing a wrong line number.
