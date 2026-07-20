@@ -171,6 +171,14 @@ public:
     static std::expected<std::shared_ptr<ShaderModule>, Error> compile(
             Context& context, const std::string& path, ShaderStage stage,
             std::optional<std::string> source = std::nullopt) {
+        if (lowercase_extension(path) == ".spv") {
+            if (source) {
+                return std::unexpected(err_shader(
+                    "source= provides text for compilation; .spv is a binary format — pass a file path",
+                    path));
+            }
+            return load_spv(context, path, stage);
+        }
         return compile_text(context, path, stage, std::move(source));
     }
 
@@ -231,6 +239,77 @@ private:
 
         std::vector<uint32_t> spirv(module.cbegin(), module.cend());
         return make_module(context, std::move(spirv), path, recorder->included());
+    }
+
+    static std::expected<std::shared_ptr<ShaderModule>, Error> load_spv(
+            Context& context, const std::string& path, ShaderStage stage) {
+        std::ifstream file(path, std::ios::ate | std::ios::binary);
+        if (!file.is_open()) {
+            return std::unexpected(err_resource("Failed to open shader file: " + path));
+        }
+
+        size_t fileSize = static_cast<size_t>(file.tellg());
+        if (fileSize % sizeof(uint32_t) != 0) {
+            return std::unexpected(err_shader(path + " is not a SPIR-V binary (size is not a multiple of 4)", path));
+        }
+
+        std::vector<uint32_t> spirv(fileSize / sizeof(uint32_t));
+        file.seekg(0);
+        file.read(reinterpret_cast<char*>(spirv.data()), fileSize);
+
+        constexpr uint32_t spirv_magic = 0x07230203u;
+        if (spirv.empty() || spirv[0] != spirv_magic) {
+            return std::unexpected(err_shader(path + " is not a SPIR-V binary (bad magic number)", path));
+        }
+
+        if (!spv_declares_stage(spirv, stage)) {
+            return std::unexpected(err_shader(
+                std::format("{} declares no {} entry point — the binary was built for a different stage",
+                            path, stage_name(stage)),
+                path));
+        }
+
+        return make_module(context, std::move(spirv), path, {});
+    }
+
+    static constexpr const char* stage_name(ShaderStage stage) {
+        switch (stage) {
+            case ShaderStage::VERTEX:   return "VERTEX";
+            case ShaderStage::FRAGMENT: return "FRAGMENT";
+            case ShaderStage::COMPUTE:  return "COMPUTE";
+        }
+        return "unknown";
+    }
+
+    // True when ANY OpEntryPoint in the binary matches `stage` — multi-entry-
+    // point modules are legal SPIR-V. Walks instructions from word 5; a zero
+    // word count means a malformed binary, and bailing out (-> "no entry point
+    // found") beats looping forever on garbage.
+    static bool spv_declares_stage(const std::vector<uint32_t>& words, ShaderStage stage) {
+        // Sentinel matches no execution model: a forged pybind int degrades to
+        // "no entry point found" instead of UB. No default case — a new stage
+        // must be a compiler diagnostic here, per project convention.
+        uint32_t wanted = 0xFFFFFFFFu;
+        switch (stage) {
+            case ShaderStage::VERTEX:   wanted = 0; break;   // ExecutionModel Vertex
+            case ShaderStage::FRAGMENT: wanted = 4; break;   // ExecutionModel Fragment
+            case ShaderStage::COMPUTE:  wanted = 5; break;   // ExecutionModel GLCompute
+        }
+
+        constexpr uint32_t op_entry_point = 15;
+        std::size_t i = 5;   // header is 5 words
+        while (i < words.size()) {
+            uint32_t opcode = words[i] & 0xFFFFu;
+            uint32_t count = words[i] >> 16;
+            if (count == 0) {
+                return false;
+            }
+            if (opcode == op_entry_point && i + 1 < words.size() && words[i + 1] == wanted) {
+                return true;
+            }
+            i += count;
+        }
+        return false;
     }
 
     static std::expected<std::shared_ptr<ShaderModule>, Error> make_module(
