@@ -387,6 +387,14 @@ public:
         return std::forward<Self>(self);
     }
 
+    // Debug name applied to the VkPipeline (validation diagnostics). No-op
+    // without VK_EXT_debug_utils — see Context::set_debug_name.
+    template <typename Self>
+    Self&& name(this Self&& self, std::string name) {
+        self.name_ = std::move(name);
+        return std::forward<Self>(self);
+    }
+
     template <typename Self>
     Self&& push_constant(this Self&& self, uint32_t size, ShaderStage stage) {
         self.layout_.add_push_constant(size, static_cast<VkShaderStageFlags>(to_vk(stage)));
@@ -472,6 +480,10 @@ public:
         auto pipeline = create_pipeline_(context_, state, pipelineLayout);
         if (!pipeline) {
             return std::unexpected(pipeline.error());
+        }
+        if (!name_.empty()) {
+            context_.set_debug_name(VK_OBJECT_TYPE_PIPELINE,
+                reinterpret_cast<std::uint64_t>(pipeline.value()), name_);
         }
 
         // Everything now belongs to the Pipeline.
@@ -781,6 +793,7 @@ private:
     FrontFace front_face_ = FrontFace::COUNTER_CLOCKWISE;
     bool blend_enable_ = false;
     Topology topology_ = Topology::TRIANGLE_LIST;
+    std::string name_;
     PipelineLayoutBuilder layout_;
 };
 
@@ -818,6 +831,12 @@ public:
         return std::forward<Self>(self);
     }
 
+    template <typename Self>
+    Self&& name(this Self&& self, std::string name) {
+        self.name_ = std::move(name);
+        return std::forward<Self>(self);
+    }
+
     // No target argument: compute has no attachments.
     std::expected<std::shared_ptr<Pipeline>, Error> build() {
         if (!shader_) {
@@ -848,6 +867,10 @@ public:
         auto pipeline = create_pipeline_(context_, shader_, pipelineLayout);
         if (!pipeline) {
             return std::unexpected(pipeline.error());
+        }
+        if (!name_.empty()) {
+            context_.set_debug_name(VK_OBJECT_TYPE_PIPELINE,
+                reinterpret_cast<std::uint64_t>(pipeline.value()), name_);
         }
 
         cleanup_layouts.release();
@@ -901,5 +924,6 @@ private:
 
     Context& context_;
     std::shared_ptr<ShaderModule> shader_;
+    std::string name_;
     PipelineLayoutBuilder layout_;
 };

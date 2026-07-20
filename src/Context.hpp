@@ -448,6 +448,30 @@ public:
 		return sampler;
 	}
 
+	// ── Debug object names ────────────────────────────────────────────────────
+	//
+	// Attach `name` to a Vulkan handle so validation messages name the culprit
+	// (the Filar A philosophy: diagnostics should say who). A silent no-op when
+	// the name is empty or VK_EXT_debug_utils is not enabled — vk-bootstrap only
+	// requests it when a debug callback is set, i.e. when validation is on, and
+	// volk then leaves vkSetDebugUtilsObjectNameEXT null. So names cost nothing
+	// in a release run and simply do not appear.
+	void set_debug_name(VkObjectType type, std::uint64_t handle, const std::string& name)
+	{
+		if (name.empty() || handle == 0 || vkSetDebugUtilsObjectNameEXT == nullptr)
+		{
+			return;
+		}
+		VkDebugUtilsObjectNameInfoEXT info{
+			.sType = VK_STRUCTURE_TYPE_DEBUG_UTILS_OBJECT_NAME_INFO_EXT,
+			.pNext = nullptr,
+			.objectType = type,
+			.objectHandle = handle,
+			.pObjectName = name.c_str()
+		};
+		vkSetDebugUtilsObjectNameEXT(vkb_device_.device, &info);
+	}
+
 	// Guards against two SwapchainRenderers fighting over the frame ring.
 	bool has_swapchain_renderer() const { return has_swapchain_renderer_; }
 	void set_has_swapchain_renderer(bool value) { has_swapchain_renderer_ = value; }

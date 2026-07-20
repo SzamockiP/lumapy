@@ -267,10 +267,17 @@ std::shared_ptr<Logger> make_default_logger()
     return logger;
 }
 
+// A timestamp query pair to wrap the frame with (GPU timing). The swapchain
+// path passes its pool; the headless path leaves it null and records nothing.
+struct TimestampRange {
+    VkQueryPool pool = VK_NULL_HANDLE;
+    std::uint32_t first = 0;
+};
+
 // Reset, begin, replay and end the per-frame VkCommandBuffer. Shared by the
 // swapchain and headless submit paths, which only differ in what happens to
 // the recorded buffer afterwards.
-VkCommandBuffer record_frame(CommandBuffer& cmd, std::uint32_t frame_index)
+VkCommandBuffer record_frame(CommandBuffer& cmd, std::uint32_t frame_index, TimestampRange ts = {})
 {
     VkCommandBuffer vkCmd = cmd.get(frame_index);
     vkResetCommandBuffer(vkCmd, 0);
@@ -286,7 +293,18 @@ VkCommandBuffer record_frame(CommandBuffer& cmd, std::uint32_t frame_index)
         raise_error(*e);
     }
 
+    // The queries must be reset on the device before use; doing it here (rather
+    // than once up front) keeps them per-frame and needs no hostQueryReset.
+    if (ts.pool != VK_NULL_HANDLE) {
+        vkCmdResetQueryPool(vkCmd, ts.pool, ts.first, 2);
+        vkCmdWriteTimestamp(vkCmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, ts.pool, ts.first);
+    }
+
     cmd.execute(vkCmd, FrameContext{ frame_index });
+
+    if (ts.pool != VK_NULL_HANDLE) {
+        vkCmdWriteTimestamp(vkCmd, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, ts.pool, ts.first + 1);
+    }
 
     if (auto e = check(vkEndCommandBuffer(vkCmd), "record command buffer")) {
         raise_error(*e);
@@ -297,7 +315,15 @@ VkCommandBuffer record_frame(CommandBuffer& cmd, std::uint32_t frame_index)
 
 }  // namespace
 void SwapchainRenderer::submit(std::shared_ptr<CommandBuffer> cmd, std::uint64_t upload_wait_serial) {
-    end_frame(record_frame(*cmd, current_frame()), upload_wait_serial);
+    TimestampRange ts{};
+    if (timestamps_supported()) {
+        ts = { timestamp_pool(), 2 * current_frame() };
+    }
+    end_frame(record_frame(*cmd, current_frame(), ts), upload_wait_serial);
+    if (timestamps_supported()) {
+        // The slot now holds results begin_frame can read once its fence signals.
+        mark_timestamp_written();
+    }
 }
 
 // Upload residency, per command buffer: every image this recording references
@@ -430,6 +456,28 @@ void context_submit(Context& context, std::shared_ptr<CommandBuffer> cmd) {
     // forever). After, not before, submitting — an update() made before this
     // call must land in the slot this submit reads.
     context.advance_frame();
+}
+
+// Attach a debug name to a Vulkan handle (empty name -> no-op). Non-dispatchable
+// handles are 64-bit; reinterpret_cast is the Vulkan-idiomatic conversion on the
+// 64-bit builds bazalt ships.
+template <typename Handle>
+void name_object(Context& ctx, VkObjectType type, Handle handle, const std::string& name) {
+    if (name.empty()) {
+        return;
+    }
+    ctx.set_debug_name(type, reinterpret_cast<std::uint64_t>(handle), name);
+}
+
+// A DynamicBuffer is one VkBuffer per in-flight frame; name each the same (a
+// StaticBuffer hands out the same handle for every frame, harmlessly re-named).
+void name_buffer(Context& ctx, const std::shared_ptr<Buffer>& buffer, const std::string& name) {
+    if (name.empty()) {
+        return;
+    }
+    for (std::uint32_t i = 0; i < ctx.frames_in_flight(); ++i) {
+        name_object(ctx, VK_OBJECT_TYPE_BUFFER, buffer->get_for_frame(i), name);
+    }
 }
 
 
@@ -687,6 +735,9 @@ PYBIND11_MODULE(_core, m) {
         // Takes any RenderTarget. A SwapchainRenderer *is* one, so windowed code
         // reads the same as offscreen code — build(renderer) still works, it just
         // isn't a special case any more.
+        .def("name", [](GraphicsPipelineBuilder& self, std::string name) -> GraphicsPipelineBuilder& {
+            return self.name(std::move(name));
+        }, py::arg("name"))
         .def("build", [](GraphicsPipelineBuilder& builder, std::shared_ptr<RenderTarget> target) -> py::object {
             auto pipeline = unwrap(builder.build(*target), nullptr);
             // Watch unconditionally: a pipeline whose shaders were all unwatched
@@ -711,6 +762,9 @@ PYBIND11_MODULE(_core, m) {
         .def("push_constant", [](ComputePipelineBuilder& self, uint32_t size) -> ComputePipelineBuilder& {
             return self.push_constant(size);
         }, py::arg("size"))
+        .def("name", [](ComputePipelineBuilder& self, std::string name) -> ComputePipelineBuilder& {
+            return self.name(std::move(name));
+        }, py::arg("name"))
         .def("build", [](ComputePipelineBuilder& builder) -> py::object {
             auto pipeline = unwrap(builder.build(), nullptr);
             if (auto* hr = builder.context().hot_reload()) hr->watch_pipeline(pipeline);
@@ -927,7 +981,7 @@ PYBIND11_MODULE(_core, m) {
             return api_version_string(self.api_version());
         })
         .def_property_readonly("headless", &Context::headless)
-        .def("create_buffer", [](Context& self, py::list list, BufferType type, MemoryUsage usage, std::optional<DataType> dataType) -> py::object {
+        .def("create_buffer", [](Context& self, py::list list, BufferType type, MemoryUsage usage, std::optional<DataType> dataType, const std::string& name) -> py::object {
             if (list.empty()) {
                 raise_error(err_resource("Cannot create buffer from empty list"));
             }
@@ -941,18 +995,23 @@ PYBIND11_MODULE(_core, m) {
             // Recorded so bind_index_buffer can pick VK_INDEX_TYPE_UINT16 vs UINT32
             // instead of assuming.
             buffer->set_data_type(actualType);
+            name_buffer(self, buffer, name);
             return py::cast(buffer);
-        }, py::arg("list"), py::arg("type"), py::arg("usage"), py::arg("data_type") = py::none())
-        .def("create_buffer", [](Context& self, py::buffer b, BufferType type, MemoryUsage usage) -> py::object {
+        }, py::arg("list"), py::arg("type"), py::arg("usage"), py::arg("data_type") = py::none(), py::kw_only(), py::arg("name") = "")
+        .def("create_buffer", [](Context& self, py::buffer b, BufferType type, MemoryUsage usage, const std::string& name) -> py::object {
             py::buffer_info info = b.request();
-            auto res = Buffer::create(self, info.ptr,
-                                      contiguous_nbytes(info, "create_buffer"), type, usage);
-            return py::cast(unwrap(std::move(res), self.logger().get()));
-        }, py::arg("array"), py::arg("type"), py::arg("usage"))
-        .def("create_buffer", [](Context& self, size_t size_in_bytes, BufferType type, MemoryUsage usage) -> py::object {
-            auto res = Buffer::create(self, nullptr, size_in_bytes, type, usage);
-            return py::cast(unwrap(std::move(res), self.logger().get()));
-        }, py::arg("size_in_bytes"), py::arg("type"), py::arg("usage"))
+            auto buffer = unwrap(Buffer::create(self, info.ptr,
+                                                contiguous_nbytes(info, "create_buffer"), type, usage),
+                                 self.logger().get());
+            name_buffer(self, buffer, name);
+            return py::cast(buffer);
+        }, py::arg("array"), py::arg("type"), py::arg("usage"), py::kw_only(), py::arg("name") = "")
+        .def("create_buffer", [](Context& self, size_t size_in_bytes, BufferType type, MemoryUsage usage, const std::string& name) -> py::object {
+            auto buffer = unwrap(Buffer::create(self, nullptr, size_in_bytes, type, usage),
+                                 self.logger().get());
+            name_buffer(self, buffer, name);
+            return py::cast(buffer);
+        }, py::arg("size_in_bytes"), py::arg("type"), py::arg("usage"), py::kw_only(), py::arg("name") = "")
         .def("graphics_pipeline", [](Context& self) -> std::shared_ptr<GraphicsPipelineBuilder> {
             return std::make_shared<GraphicsPipelineBuilder>(self);
         })
@@ -971,7 +1030,7 @@ PYBIND11_MODULE(_core, m) {
             }
             return py::cast(module);
         }, py::arg("path"), py::arg("stage"), py::kw_only(), py::arg("source") = py::none())
-        .def("load_image", [](Context& self, const std::string& path) -> py::object {
+        .def("load_image", [](Context& self, const std::string& path, const std::string& name) -> py::object {
             // sRGB with a full mip chain: files are pictures. Arrays go through
             // create_image and stay UNORM: arrays are data.
             //
@@ -986,9 +1045,10 @@ PYBIND11_MODULE(_core, m) {
             }
             auto* manager = static_cast<UploadManager*>(self.upload_manager());
             auto image = unwrap(manager->load(path), self.logger().get());
+            name_object(self, VK_OBJECT_TYPE_IMAGE, image->vk_image(), name);
             if (auto* hr = self.hot_reload()) hr->watch_image(image, path);
             return py::cast(image);
-        }, py::arg("path"))
+        }, py::arg("path"), py::kw_only(), py::arg("name") = "")
         .def_property_readonly("uploads_done", [](const Context& self) {
             return self.upload_manager() ? self.upload_manager()->uploads_done() : true;
         })
@@ -1005,10 +1065,12 @@ PYBIND11_MODULE(_core, m) {
         })
         // Registered before the buffer overload so two ints never reach the
         // buffer protocol.
-        .def("create_image", [](Context& self, uint32_t width, uint32_t height, Format format) -> py::object {
-            return py::cast(unwrap(Image::create_empty(self, width, height, format), self.logger().get()));
-        }, py::arg("width"), py::arg("height"), py::arg("format") = Format::RGBA8)
-        .def("create_image", [](Context& self, py::buffer b) -> py::object {
+        .def("create_image", [](Context& self, uint32_t width, uint32_t height, Format format, const std::string& name) -> py::object {
+            auto image = unwrap(Image::create_empty(self, width, height, format), self.logger().get());
+            name_object(self, VK_OBJECT_TYPE_IMAGE, image->vk_image(), name);
+            return py::cast(image);
+        }, py::arg("width"), py::arg("height"), py::arg("format") = Format::RGBA8, py::kw_only(), py::arg("name") = "")
+        .def("create_image", [](Context& self, py::buffer b, const std::string& name) -> py::object {
             py::buffer_info info = b.request();
             contiguous_nbytes(info, "create_image");
 
@@ -1049,10 +1111,12 @@ PYBIND11_MODULE(_core, m) {
                     info.format, channels)));
             }
 
-            return py::cast(unwrap(
+            auto image = unwrap(
                 Image::create_from_pixels(self, info.ptr, width, height, *format),
-                self.logger().get()));
-        }, py::arg("array"))
+                self.logger().get());
+            name_object(self, VK_OBJECT_TYPE_IMAGE, image->vk_image(), name);
+            return py::cast(image);
+        }, py::arg("array"), py::kw_only(), py::arg("name") = "")
         .def("create_sampler", [](Context& self, Filter filter, AddressMode address_mode, bool anisotropy,
                                   std::optional<CompareOp> compare) -> py::object {
             // Cached: identical descriptions return the identical object.
@@ -1226,6 +1290,9 @@ PYBIND11_MODULE(_core, m) {
             frame->serial = self->current_serial();
             frame->frame_index = self->current_frame();
             frame->image_index = self->current_image_index();
+            // Snapshot the GPU time read back during begin_frame, so it stays
+            // stable for the frame's lifetime regardless of later begin_frames.
+            frame->gpu_time_ms = self->gpu_time_ms();
             return py::cast(frame);
         })
         .def_property_readonly("width", [](const SwapchainRenderer& r) { return r.extent().width; })
@@ -1241,7 +1308,12 @@ PYBIND11_MODULE(_core, m) {
             }
             unwrap(std::move(r), nullptr);
         }, py::arg("cmd"))
-        .def_property_readonly("frame_index", [](const Frame& f) { return f.frame_index; });
+        .def_property_readonly("frame_index", [](const Frame& f) { return f.frame_index; })
+        // float milliseconds, or None until the ring has cycled once / on
+        // devices without timestamp support.
+        .def_property_readonly("gpu_time_ms", [](const Frame& f) -> py::object {
+            return f.gpu_time_ms ? py::cast(*f.gpu_time_ms) : py::none();
+        });
 
     // ── Key Constants ──
     m.attr("KEY_SPACE") = GLFW_KEY_SPACE;
