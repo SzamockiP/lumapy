@@ -7,6 +7,7 @@
 #include <format>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <vector>
 #include <string>
 #include <algorithm>
@@ -202,6 +203,10 @@ public:
 			return std::unexpected(r.error());
 		}
 
+		// Best-effort: a device without timestamp support just reports
+		// gpu_time_ms as None, never an error.
+		renderer->create_timestamp_pool_();
+
 		context->set_has_swapchain_renderer(true);
 		return renderer;
 	}
@@ -229,6 +234,10 @@ public:
 		for (auto sem : render_finished_semaphores_)
 		{
 			if (sem) vkDestroySemaphore(context_->device(), sem, nullptr);
+		}
+
+		if (timestamp_pool_) {
+			vkDestroyQueryPool(context_->device(), timestamp_pool_, nullptr);
 		}
 
 		if (depth_image_view_) {
@@ -297,6 +306,21 @@ public:
 		}
 	}
 
+	// ── GPU timing ────────────────────────────────────────────────────────────
+	//
+	// The GPU duration of the frame submitted `frames_in_flight` frames ago (a
+	// timestamp pair around each submit, read back once its fence is signalled).
+	// None for the first frames_in_flight frames, and on devices without
+	// timestamp support. Windowed only: the headless submit is a blocking
+	// wait-idle, where wall-clock time already is the GPU time.
+	std::optional<double> gpu_time_ms() const { return last_gpu_time_ms_; }
+
+	bool timestamps_supported() const { return timestamp_pool_ != VK_NULL_HANDLE; }
+	VkQueryPool timestamp_pool() const { return timestamp_pool_; }
+	// submit() calls this after recording the timestamp pair for current_frame(),
+	// so begin_frame knows the slot has results to read next time round.
+	void mark_timestamp_written() { slot_written_[current_frame()] = true; }
+
 	void submit(std::shared_ptr<CommandBuffer> cmd, std::uint64_t upload_wait_serial = 0);
 
 	// Returns true if a frame was successfully acquired and is ready for rendering.
@@ -312,6 +336,14 @@ public:
 		// harmless: nothing gets submitted under it.
 		context_->advance_frame();
 
+		// Apply any pending hot reloads before this frame records: pipeline
+		// rebuilds are handle swaps and old handles retire through the deletion
+		// queue keyed by the current submit serial, so in-flight frames are safe.
+		if (auto* hr = context_->hot_reload())
+		{
+			hr->drain();
+		}
+
 		// Check framebuffer size — return false if minimized (0x0)
 		auto [width, height] = surface_provider_.get_framebuffer_size();
 		if (width == 0 || height == 0) {
@@ -320,6 +352,10 @@ public:
 		}
 
 		vkWaitForFences(context_->device(), 1, &in_flight_fences_[current_frame()], VK_TRUE, UINT64_MAX);
+
+		// The fence proves this slot's previous submission finished, so its
+		// timestamp pair is ready to read (frames_in_flight frames of latency).
+		read_timestamps_();
 
 		// A frame boundary is the natural point to reclaim deferred handles;
 		// the submission timeline says how far the GPU actually got.
@@ -452,6 +488,86 @@ private:
 
 	PresentMode preferred_present_mode_ = PresentMode::MAILBOX;
 	VkPresentModeKHR active_present_mode_ = VK_PRESENT_MODE_FIFO_KHR;
+
+	// GPU timing: two timestamp queries per in-flight frame (start/end).
+	// timestamp_pool_ stays null on devices without support → gpu_time_ms is
+	// None. slot_written_ gates reads so a never-submitted slot is not queried.
+	VkQueryPool timestamp_pool_ = VK_NULL_HANDLE;
+	float timestamp_period_ = 0.0f;
+	std::uint32_t timestamp_valid_bits_ = 0;
+	std::vector<bool> slot_written_;
+	std::optional<double> last_gpu_time_ms_;
+
+	// Best-effort: any missing capability leaves timestamp_pool_ null.
+	void create_timestamp_pool_()
+	{
+		// Opt-in only. Off (the default), no pool exists, so submit records no
+		// timestamps, begin_frame reads none, and gpu_time_ms stays None — no
+		// per-frame timestamp work at all, which is the point of the default.
+		if (!context_->gpu_timing())
+		{
+			return;
+		}
+
+		VkPhysicalDeviceProperties props{};
+		vkGetPhysicalDeviceProperties(context_->physical_device(), &props);
+		if (props.limits.timestampPeriod <= 0.0f)
+		{
+			return;
+		}
+
+		std::uint32_t family_count = 0;
+		vkGetPhysicalDeviceQueueFamilyProperties(context_->physical_device(), &family_count, nullptr);
+		std::vector<VkQueueFamilyProperties> families(family_count);
+		vkGetPhysicalDeviceQueueFamilyProperties(context_->physical_device(), &family_count, families.data());
+		const std::uint32_t graphics_family = context_->graphics_queue_family();
+		if (graphics_family >= family_count || families[graphics_family].timestampValidBits == 0)
+		{
+			return;
+		}
+
+		VkQueryPoolCreateInfo poolInfo{
+			.sType = VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO,
+			.pNext = nullptr,
+			.flags = 0,
+			.queryType = VK_QUERY_TYPE_TIMESTAMP,
+			.queryCount = 2 * context_->frames_in_flight(),
+			.pipelineStatistics = 0
+		};
+		if (vkCreateQueryPool(context_->device(), &poolInfo, nullptr, &timestamp_pool_) != VK_SUCCESS)
+		{
+			timestamp_pool_ = VK_NULL_HANDLE;
+			return;
+		}
+		timestamp_period_ = props.limits.timestampPeriod;
+		timestamp_valid_bits_ = families[graphics_family].timestampValidBits;
+		slot_written_.assign(context_->frames_in_flight(), false);
+	}
+
+	// After the fence wait: read this slot's previous timestamp pair with no
+	// WAIT_BIT (the fence already proved completion). Unwritten slot or a
+	// not-ready result → None.
+	void read_timestamps_()
+	{
+		const std::uint32_t slot = current_frame();
+		if (timestamp_pool_ == VK_NULL_HANDLE || slot >= slot_written_.size() || !slot_written_[slot])
+		{
+			last_gpu_time_ms_ = std::nullopt;
+			return;
+		}
+		std::uint64_t ts[2] = { 0, 0 };
+		if (vkGetQueryPoolResults(context_->device(), timestamp_pool_, 2 * slot, 2,
+		                          sizeof(ts), ts, sizeof(std::uint64_t), VK_QUERY_RESULT_64_BIT) != VK_SUCCESS)
+		{
+			last_gpu_time_ms_ = std::nullopt;
+			return;
+		}
+		const std::uint64_t mask = timestamp_valid_bits_ >= 64
+			? ~std::uint64_t{ 0 }
+			: ((std::uint64_t{ 1 } << timestamp_valid_bits_) - 1);
+		const std::uint64_t delta = (ts[1] - ts[0]) & mask;
+		last_gpu_time_ms_ = static_cast<double>(delta) * static_cast<double>(timestamp_period_) / 1.0e6;
+	}
 
 	std::expected<void, Error> create_swapchain_manually(int width, int height, VkSwapchainKHR old_swapchain = VK_NULL_HANDLE)
 	{
@@ -698,6 +814,11 @@ struct Frame
 	std::uint32_t frame_index = 0;
 	std::uint32_t image_index = 0;
 	bool submitted = false;
+
+	// The GPU time of the frame frames_in_flight ago, read back when this frame
+	// was acquired; None until the ring has cycled once, and on unsupported
+	// devices. Snapshotted at begin_frame so it is stable for the frame's life.
+	std::optional<double> gpu_time_ms;
 
 	// Records, submits and presents. Defined in main.cpp next to record_frame.
 	std::expected<void, Error> submit(std::shared_ptr<CommandBuffer> cmd);

@@ -6,7 +6,14 @@ way to run bazalt without a window, so there were no tests at all and an entire
 class of bug was invisible.
 """
 
+import os
 import pathlib
+
+# A fast poll keeps the hot-reload tests quick; set before bazalt is imported so
+# the watcher (created with the session Context below) reads it. A test/CI knob,
+# not public API — the Python surface stays at one kwarg. setdefault lets a real
+# CI override it.
+os.environ.setdefault("BAZALT_HOT_RELOAD_POLL_MS", "20")
 
 import pytest
 
@@ -28,7 +35,12 @@ def _session_context():
     messages = []
     logger = bz.Logger(min_severity=bz.Severity.INFO)
     logger.on_message(messages.append)
-    context = bz.Context(logger, validation="auto")
+    # hot_reload=True and gpu_timing=True for the whole suite: both run under
+    # every test, so validation-as-assert audits them continuously, and it's the
+    # only way to exercise them given one Context per process. Hot reload for
+    # files that never change never fires; the timestamp path is opt-in so the
+    # gpu_time_ms test needs it on here (default apps pay nothing).
+    context = bz.Context(logger, validation="auto", hot_reload=True, gpu_timing=True)
     yield context, logger, messages
 
 

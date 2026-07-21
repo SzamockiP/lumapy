@@ -50,6 +50,30 @@ public:
 	virtual void wait_all() = 0;
 };
 
+// These live in headers that include Context.hpp, so Context can only name them.
+class ShaderModule;
+class Pipeline;
+class Image;
+
+// The hot-reload file watcher, seen from the Context's side — same abstract
+// interface trick as UploadManagerBase (the concrete HotReloadWatcher lives in
+// HotReload.hpp, which needs the full Pipeline/ShaderModule/Image/UploadManager
+// definitions). Created in the Context binding when hot_reload=True.
+//
+// watch_* register a resource for watching (called from the Python bindings on
+// the main thread). drain() applies whatever changed since the last call and is
+// MAIN THREAD ONLY — it recompiles shaders (the includer is unlocked) and calls
+// vkCreate*. The frame path and the headless submit path both drain it.
+class HotReloadBase
+{
+public:
+	virtual ~HotReloadBase() = default;
+	virtual void watch_shader(std::shared_ptr<ShaderModule> module) = 0;
+	virtual void watch_pipeline(std::shared_ptr<Pipeline> pipeline) = 0;
+	virtual void watch_image(std::shared_ptr<Image> image, std::string path) = 0;
+	virtual void drain() = 0;
+};
+
 // Everything the caller can ask of a Context, in capability terms.
 struct ContextConfig
 {
@@ -67,6 +91,10 @@ struct ContextConfig
 	// begin/end_rendering are NOT covered by this switch — they are the
 	// RenderTarget contract and stay automatic always.
 	bool auto_barriers = true;
+
+	// frame.gpu_time_ms: a timestamp pair recorded around every windowed submit.
+	// Off by default because it is a profiling diagnostic
+	bool gpu_timing = false;
 
 	// Escape hatch, documented as "you shouldn't need this". Present so that the
 	// capability abstraction never becomes a ceiling.
@@ -106,6 +134,7 @@ public:
 		auto context = std::shared_ptr<Context>(new Context(logger));
 		context->frames_in_flight_ = config.frames_in_flight;
 		context->auto_barriers_ = config.auto_barriers;
+		context->gpu_timing_ = config.gpu_timing;
 
 		auto target_api = create_instance_(*context, config, logger);
 		if (!target_api)
@@ -156,6 +185,12 @@ public:
 		{
 			live_contexts_.fetch_sub(1);
 		}
+
+		// Before anything it observes goes away: stop the watcher thread. It
+		// touches no Vulkan and no Python (errors go through the Logger's own
+		// queue), so joining it is unconditional and needs no atexit dance — the
+		// jthread destructor requests the stop and joins.
+		hot_reload_.reset();
 
 		// First: stop the upload worker. Its destructor abandons undecoded jobs
 		// (the process is going away; decoding more would only delay exit),
@@ -250,6 +285,8 @@ public:
 	// progressed", which a modulo index cannot answer.
 	std::uint32_t frames_in_flight() const { return frames_in_flight_; }
 	bool auto_barriers() const { return auto_barriers_; }
+	// Whether the swapchain renderer records frame.gpu_time_ms timestamps.
+	bool gpu_timing() const { return gpu_timing_; }
 	std::uint64_t frame_serial() const { return frame_serial_; }
 	std::uint32_t frame_index() const
 	{
@@ -348,6 +385,17 @@ public:
 		upload_manager_ = std::move(manager);
 	}
 
+	// ── Hot reload ────────────────────────────────────────────────────────────
+	//
+	// Null unless the Context was created with hot_reload=True. The frame path
+	// (SwapchainRenderer::begin_frame) and the headless submit both drain it on
+	// the main thread.
+	HotReloadBase* hot_reload() const { return hot_reload_.get(); }
+	void set_hot_reload(std::unique_ptr<HotReloadBase> watcher)
+	{
+		hot_reload_ = std::move(watcher);
+	}
+
 	// ── Sampler cache ─────────────────────────────────────────────────────────
 	//
 	// Identical descriptions share one VkSampler; Texture used to create a
@@ -405,6 +453,30 @@ public:
 		auto sampler = std::make_shared<Sampler>(handle, desc);
 		sampler_cache_.emplace(key, sampler);
 		return sampler;
+	}
+
+	// ── Debug object names ────────────────────────────────────────────────────
+	//
+	// Attach `name` to a Vulkan handle so validation messages name the culprit
+	// (the Filar A philosophy: diagnostics should say who). A silent no-op when
+	// the name is empty or VK_EXT_debug_utils is not enabled — vk-bootstrap only
+	// requests it when a debug callback is set, i.e. when validation is on, and
+	// volk then leaves vkSetDebugUtilsObjectNameEXT null. So names cost nothing
+	// in a release run and simply do not appear.
+	void set_debug_name(VkObjectType type, std::uint64_t handle, const std::string& name)
+	{
+		if (name.empty() || handle == 0 || vkSetDebugUtilsObjectNameEXT == nullptr)
+		{
+			return;
+		}
+		VkDebugUtilsObjectNameInfoEXT info{
+			.sType = VK_STRUCTURE_TYPE_DEBUG_UTILS_OBJECT_NAME_INFO_EXT,
+			.pNext = nullptr,
+			.objectType = type,
+			.objectHandle = handle,
+			.pObjectName = name.c_str()
+		};
+		vkSetDebugUtilsObjectNameEXT(vkb_device_.device, &info);
 	}
 
 	// Guards against two SwapchainRenderers fighting over the frame ring.
@@ -883,6 +955,7 @@ private:
 
 	std::uint32_t frames_in_flight_ = 2;
 	bool auto_barriers_ = true;
+	bool gpu_timing_ = false;
 	std::uint64_t frame_serial_ = 0;
 
 	VkSemaphore submit_timeline_ = VK_NULL_HANDLE;
@@ -893,4 +966,5 @@ private:
 
 	std::unordered_map<std::uint32_t, std::shared_ptr<Sampler>> sampler_cache_;
 	std::unique_ptr<UploadManagerBase> upload_manager_;
+	std::unique_ptr<HotReloadBase> hot_reload_;
 };
