@@ -372,12 +372,22 @@ struct RenderingScope {
     std::vector<float> clear_color;
 };
 
-// The state behind `with cmd.timer("name"):`. __enter__ records the opening
-// timestamp and remembers the scope index; __exit__ records the closing one.
-struct TimerScope {
+// A GPU timer handle. cmd.timer() records the opening timestamp and returns
+// one of these; it is stopped explicitly (stop) or by a `with` (__exit__), and
+// read back off itself (ms). The handle IS the identity — no name, no key.
+// Holds the command buffer alive so the query pool outlives the handle.
+struct Timer {
     std::shared_ptr<CommandBuffer> cmd;
-    std::string name;
     std::size_t index = 0;
+    std::uint64_t generation = 0;
+    bool stopped = false;
+
+    void stop() {
+        if (!stopped) {
+            cmd->stop_timer(index);  // idempotent: a query written twice would be UB
+            stopped = true;
+        }
+    }
 };
 
 // Readback shaped for numpy: (h, w, channels) — or (h, w) for single-channel
@@ -831,14 +841,13 @@ PYBIND11_MODULE(_core, m) {
                              const std::vector<float>& clear_color) {
             return RenderingScope{ std::move(self), std::move(target), clear_color };
         }, py::arg("target"), py::arg("clear_color") = std::vector<float>{0.0f, 0.0f, 0.0f, 1.0f})
-        // GPU timer scope: `with cmd.timer("blur"):` brackets the enclosed
-        // commands; cmd.timer_ms("blur") reads the result after a submit.
-        .def("timer", [](std::shared_ptr<CommandBuffer> self, std::string name) {
-            return TimerScope{ std::move(self), std::move(name) };
-        }, py::arg("name"))
-        .def("timer_ms", [](CommandBuffer& self, const std::string& name) {
-            return self.timer_ms(name);
-        }, py::arg("name"))
+        // GPU timer: records the opening timestamp and returns a Timer handle.
+        // Stop it with t.stop() or a `with` block; read it back with t.ms.
+        .def("timer", [](std::shared_ptr<CommandBuffer> self) {
+            const std::size_t index = self->start_timer();
+            const std::uint64_t generation = self->recording_generation();
+            return std::make_shared<Timer>(Timer{ std::move(self), index, generation, false });
+        })
         // The no-argument versions are gone: begin_rendering emits a full-target
         // viewport and scissor itself. These remain for split-screen and similar.
         .def("set_viewport", [](std::shared_ptr<CommandBuffer> self, float x, float y, float width, float height) {
@@ -910,14 +919,15 @@ PYBIND11_MODULE(_core, m) {
             return false;  // never swallow exceptions
         });
 
-    py::class_<TimerScope>(m, "TimerScope")
-        .def("__enter__", [](TimerScope& self) {
-            self.index = self.cmd->begin_timer(self.name);
-            return self.cmd;
-        })
-        .def("__exit__", [](TimerScope& self, py::object, py::object, py::object) {
-            self.cmd->end_timer(self.index);
+    py::class_<Timer, std::shared_ptr<Timer>>(m, "Timer")
+        .def("stop", [](Timer& self) { self.stop(); })
+        .def("__enter__", [](std::shared_ptr<Timer> self) { return self; })
+        .def("__exit__", [](Timer& self, py::object, py::object, py::object) {
+            self.stop();
             return false;  // never swallow exceptions
+        })
+        .def_property_readonly("ms", [](const Timer& self) {
+            return self.cmd->read_timer(self.index, self.generation);
         });
 
     // ── Window (GLFW) ──

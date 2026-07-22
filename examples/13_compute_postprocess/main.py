@@ -8,9 +8,9 @@ The 0.9 headline, end to end:
   * a fullscreen pass samples that image to the screen. The barrier that takes
     the image from GENERAL (storage) to SHADER_READ_ONLY (sampled) is recorded
     for you and hoisted before the render pass — no cmd.barrier() by hand;
-  * `with cmd.timer("generate"):` measures the dispatch. Read it back with
-    cmd.timer_ms("generate") after a blocking submit — no window needed, which
-    is why the measurement below runs before the render loop.
+  * cmd.timer() measures the dispatch — a handle you stop with a `with` block
+    or t.stop() and read back with t.ms after a blocking submit (no window
+    needed, which is why the measurement below runs before the render loop).
 
 The command buffer is re-recorded each frame only because the animation time is
 a push constant; the storage-image barriers are recomputed identically each
@@ -67,7 +67,7 @@ present_set.set_image(0, image)
 
 def record(cmd, t):
     cmd.begin()
-    with cmd.timer("generate"):
+    with cmd.timer():
         (cmd.bind_pipeline(generate)
             .bind_descriptor_set(gen_set, generate, set=0)
             .push_constants(generate, 0, struct.pack("<f", t))
@@ -76,18 +76,17 @@ def record(cmd, t):
         cmd.bind_pipeline(present).bind_descriptor_set(present_set, present, set=0).draw(3)
 
 
-# Measure the compute cost with one blocking headless submit — timer_ms reads
+# Measure the compute cost with one blocking headless submit — the timer reads
 # back reliably here (no swapchain, no frames-in-flight race).
 measure = ctx.create_command_buffer()
 measure.begin()
-with measure.timer("generate"):
+with measure.timer() as t:
     (measure.bind_pipeline(generate)
         .bind_descriptor_set(gen_set, generate, set=0)
         .push_constants(generate, 0, struct.pack("<f", 0.0))
         .dispatch((W + 7) // 8, (H + 7) // 8))
 ctx.submit(measure)
-ms = measure.timer_ms("generate")
-print(f"compute generate ({W}x{H}): {ms:.4f} ms" if ms is not None
+print(f"compute generate ({W}x{H}): {t.ms:.4f} ms" if t.ms is not None
       else "compute generate: timestamps unsupported on this device")
 
 cmd = ctx.create_command_buffer()

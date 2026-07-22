@@ -30,14 +30,17 @@ for you. Plus per-scope GPU timers that read back headless.
   barrier is illegal inside dynamic rendering. Uploaded textures the tracker
   never saw are left untouched, so ordinary texturing costs nothing. Every
   auto-barrier path is checked by sync-validation-as-assert in the test suite.
-- **Per-scope GPU timers.** `with cmd.timer("blur"):` brackets a slice of the
-  recording; `cmd.timer_ms("blur")` returns its GPU wall-clock in milliseconds.
-  Unlike `frame.gpu_time_ms` this needs no window and no `begin_frame` — a
-  blocking headless submit means the result is ready as soon as `ctx.submit()`
-  returns, which is the point (profiling a dispatch is the use case). Self-gating:
-  the query pool exists only once a timer is used, so apps that don't time pay
-  nothing, no Context flag. Best-effort: a device without timestamp support
-  reports `None`.
+- **GPU timers.** `cmd.timer()` records a timestamp and returns a `Timer`
+  handle; stop it with a `with` block or `t.stop()` and read the GPU wall-clock
+  in milliseconds off `t.ms`. The handle is the identity — no names, no keys —
+  so several, nested and overlapping timers all work, and there is no forced
+  `with`. Unlike `frame.gpu_time_ms` this needs no window and no `begin_frame`:
+  a blocking headless submit means `t.ms` is ready as soon as `ctx.submit()`
+  returns (profiling a dispatch is the use case). A handle read after the
+  command buffer was re-recorded reports `None` (its slots now belong to a
+  different timer). Self-gating: the query pool exists only once a timer is used,
+  so apps that don't time pay nothing, no Context flag. Best-effort: a device
+  without timestamp support reports `None`.
 - New example `13_compute_postprocess`: a compute shader generates an animated
   image into a storage image and a fullscreen pass samples it, timing the
   dispatch.

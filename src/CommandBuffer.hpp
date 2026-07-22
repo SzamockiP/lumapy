@@ -84,9 +84,11 @@ public:
         tracked_writes_ = false;
         in_rendering_ = false;
         rendering_insert_pos_ = 0;
-        // Timer scopes are re-declared each recording; the query pool itself is
-        // kept and reset (vkCmdResetQueryPool) at the top of every replay.
-        timer_names_.clear();
+        // Timers are re-declared each recording; the query pool itself is kept
+        // and reset (vkCmdResetQueryPool) at the top of every replay. Bumping
+        // the generation invalidates handles from the previous recording.
+        timer_count_ = 0;
+        ++recording_generation_;
         return *this;
     }
 
@@ -412,42 +414,45 @@ public:
 
     // ── GPU timers ──────────────────────────────────────────────────────────
     //
-    // `with cmd.timer("blur"):` brackets a slice of the recording with a pair of
-    // vkCmdWriteTimestamp calls; after a completed submit, cmd.timer_ms("blur")
-    // returns the GPU wall-clock of that slice in milliseconds. Unlike 0.8's
-    // frame.gpu_time_ms this needs no window and no begin_frame — the headless
-    // submit blocks, so the readback is ready as soon as ctx.submit() returns,
-    // which is the point (profiling a dispatch is the main use case).
+    // A GPU timer is a pair of query slots — exactly a Vulkan timestamp query.
+    // The Python-facing handle (class Timer, in main.cpp) owns one such pair:
+    // cmd.timer() records the opening timestamp and hands back the handle, which
+    // is stopped explicitly (t.stop()) or by a `with`, and read back off itself
+    // (t.ms). The handle IS the identity — no name, no key — so multiple, nested
+    // and overlapping timers all just work.
+    //
+    // Unlike 0.8's frame.gpu_time_ms this needs no window and no begin_frame:
+    // the headless submit blocks, so the readback is ready as soon as
+    // ctx.submit() returns (profiling a dispatch is the use case).
     //
     // Self-gating: the query pool is created only when a timer is actually used,
     // so an app that never calls timer() pays nothing, no Context flag required.
     // Best-effort: a device without timestamp support reports None, never errors.
 
-    // Records the opening timestamp and returns the scope's index (its two query
-    // slots are 2*index / 2*index+1). Paired with end_timer by the with-scope.
-    std::size_t begin_timer(std::string name) {
-        const std::size_t index = timer_names_.size();
-        timer_names_.push_back(std::move(name));
+    // Records the opening timestamp and returns the timer's index (its two query
+    // slots are 2*index / 2*index+1). Paired with stop_timer.
+    std::size_t start_timer() {
+        const std::size_t index = timer_count_++;
         record_timer_write_(static_cast<std::uint32_t>(2 * index), VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT);
         return index;
     }
 
-    void end_timer(std::size_t index) {
+    void stop_timer(std::size_t index) {
         record_timer_write_(static_cast<std::uint32_t>(2 * index + 1), VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT);
     }
 
-    // The measured time of a scope, or nullopt if timestamps are unsupported,
-    // the name was never recorded, or the results are not ready yet (a submit
-    // still in flight — for a blocking headless submit they always are).
-    std::optional<double> timer_ms(const std::string& name) const {
-        if (timer_pool_ == VK_NULL_HANDLE) {
-            return std::nullopt;
-        }
-        std::size_t index = timer_names_.size();
-        for (std::size_t i = 0; i < timer_names_.size(); ++i) {
-            if (timer_names_[i] == name) { index = i; break; }
-        }
-        if (index == timer_names_.size()) {
+    // Which recording a timer belongs to. begin() bumps this, so a handle read
+    // after the command buffer was re-recorded reports None (its slots now hold
+    // a different timer's data) instead of a misleading number.
+    std::uint64_t recording_generation() const { return recording_generation_; }
+
+    // The measured time of one timer in milliseconds, or nullopt when:
+    // timestamps are unsupported, the handle is from a superseded recording, or
+    // the results are not ready (a submit still in flight — a blocking headless
+    // submit always is).
+    std::optional<double> read_timer(std::size_t index, std::uint64_t generation) const {
+        if (timer_pool_ == VK_NULL_HANDLE || generation != recording_generation_ ||
+            index >= timer_count_) {
             return std::nullopt;
         }
         std::uint64_t ts[2] = { 0, 0 };
@@ -512,8 +517,8 @@ public:
         // illegal inside a render pass, so the top of execute is the one safe
         // spot. The timestamp-write lambdas read timer_pool_ at execute, so a
         // grow that recreates the pool is picked up without re-recording.
-        if (!timer_names_.empty()) {
-            ensure_timer_pool_(2 * timer_names_.size());
+        if (timer_count_ > 0) {
+            ensure_timer_pool_(2 * timer_count_);
             if (timer_pool_ != VK_NULL_HANDLE) {
                 vkCmdResetQueryPool(vkCmd, timer_pool_, 0, timer_capacity_);
             }
@@ -782,5 +787,6 @@ private:
     float timer_period_ = 0.0f;
     std::uint32_t timer_valid_bits_ = 0;
     std::optional<bool> timer_supported_;  // queried once, lazily
-    std::vector<std::string> timer_names_;  // scope index -> name (reset by begin)
+    std::size_t timer_count_ = 0;           // timers declared this recording
+    std::uint64_t recording_generation_ = 0;  // bumped by begin(); stale-handle guard
 };

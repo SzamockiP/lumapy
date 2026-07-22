@@ -476,25 +476,23 @@ class CommandBuffer:
     def bind_descriptor_set(self, descriptor_set: DescriptorSet, pipeline: Pipeline,
                             set: int) -> CommandBuffer: ...
 
-    def timer(self, name: str) -> TimerScope:
-        """A GPU timer scope:
+    def timer(self) -> Timer:
+        """Start a GPU timer and return its handle. Records a timestamp here;
+        stop it with a `with` block or Timer.stop(), read it back with Timer.ms:
 
-            with cmd.timer("blur"):
+            with cmd.timer() as t:
                 cmd.bind_pipeline(blur).dispatch(gx, gy)
-            ...
-            ctx.submit(cmd)
-            print(cmd.timer_ms("blur"))
+            ...                     # or, without `with`:
+            t = cmd.timer()         #   t = cmd.timer()
+            ...                     #   cmd.dispatch(...)
+            ctx.submit(cmd)         #   t.stop()
+            print(t.ms)
 
-        Brackets the enclosed commands with a timestamp pair. Unlike
-        frame.gpu_time_ms this works headless — the blocking submit means the
-        result is ready as soon as submit() returns. Self-gating: the query pool
-        exists only once a timer is used, so apps that don't time pay nothing."""
-        ...
-
-    def timer_ms(self, name: str) -> Optional[float]:
-        """The measured GPU time of a timer scope in milliseconds, or None if
-        timestamps are unsupported, the name was never recorded, or the submit
-        has not completed (a blocking headless submit always has)."""
+        The handle is the identity — no names, no keys — so several, nested and
+        overlapping timers all work. Unlike frame.gpu_time_ms this needs no
+        window: the blocking headless submit means t.ms is ready as soon as
+        submit() returns. Self-gating: the query pool exists only once a timer is
+        used, so apps that don't time pay nothing."""
         ...
 
 class RenderingScope:
@@ -503,10 +501,22 @@ class RenderingScope:
     def __enter__(self) -> CommandBuffer: ...
     def __exit__(self, exc_type: Any, exc: Any, tb: Any) -> bool: ...
 
-class TimerScope:
-    """Returned by CommandBuffer.timer(); use it in a `with` statement."""
+class Timer:
+    """A GPU timer handle from CommandBuffer.timer(). Usable as a context
+    manager (`with cmd.timer() as t:`) or stopped by hand (t.stop())."""
 
-    def __enter__(self) -> CommandBuffer: ...
+    def stop(self) -> None:
+        """Record the closing timestamp. Idempotent; called for you on `with`
+        exit."""
+        ...
+    @property
+    def ms(self) -> Optional[float]:
+        """Measured GPU time in milliseconds, or None if timestamps are
+        unsupported, the command buffer was re-recorded since (the handle is
+        stale), or the submit has not completed (a blocking headless submit
+        always has)."""
+        ...
+    def __enter__(self) -> Timer: ...
     def __exit__(self, exc_type: Any, exc: Any, tb: Any) -> bool: ...
 
 class Window:
