@@ -29,8 +29,15 @@ environment maps and procedural cubemaps without leaving the
     layered image loaded from disk (async, sRGB + mips), array or cubemap.
 - **`Image.array_layers` and `Image.is_cube`** report the layer count and whether
   an image is a cubemap (alongside `width`/`height`/`mip_levels`).
+- **Manual image barrier: `cmd.barrier(image, src, dst)`** (the image counterpart
+  of the buffer overload). The layout follows the access — `SHADER_WRITE` =
+  `GENERAL`, `SHADER_READ` = `SHADER_READ_ONLY` — so the one case the automatic
+  tracker can't reach, a compute-baked image sampled across *later* submits,
+  becomes one call: bake it once, `cmd.barrier(img, SHADER_WRITE, SHADER_READ)`,
+  then sample it every frame without regenerating. Covers every mip and layer.
 - New example `14_skybox`: an empty cubemap is filled face-by-face by a compute
-  shader and sampled as a `samplerCube` skybox with a per-pixel world-space ray.
+  shader **once**, made sampleable with `cmd.barrier`, and sampled as a
+  `samplerCube` skybox with a per-pixel world-space ray.
 
 ### Changed
 - Image upload, mip generation and the automatic layout barriers now cover every
@@ -50,11 +57,12 @@ environment maps and procedural cubemaps without leaving the
   image's creation flag and view type — it is not a sampler setting (the sampler
   is identical for 2D, arrays and cubemaps).
 - **Out of scope for now (documented, not a regression):** rendering *into*
-  cubemap/array layers (dynamic environment capture, cascade shadow maps) needs
-  per-layer render-target views — a later release. In 0.10 an empty layered image
-  is filled by uploading pixels or by a compute storage image. The remaining 0.5
-  backlog (async headless submit, async `StaticBuffer`, Sampler debug names)
-  stays deferred.
+  cubemap/array layers with the graphics pipeline (dynamic environment capture,
+  cascade shadow maps) needs per-layer render-target views — a later release. In
+  0.10 an empty layered image is filled by uploading pixels or by a compute
+  storage image (baked once with `cmd.barrier`, then sampled every frame). The
+  remaining 0.5 backlog (async headless submit, async `StaticBuffer`, Sampler
+  debug names) stays deferred.
 
 ## [0.9.0] — 2026-07-22
 

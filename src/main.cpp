@@ -942,6 +942,11 @@ PYBIND11_MODULE(_core, m) {
             unwrap(self->barrier(std::move(buffer), src, dst), nullptr);
             return self;
         }, py::arg("buffer"), py::arg("src"), py::arg("dst"))
+        .def("barrier", [](std::shared_ptr<CommandBuffer> self, std::shared_ptr<Image> image,
+                           Access src, Access dst) {
+            unwrap(self->barrier(std::move(image), src, dst), nullptr);
+            return self;
+        }, py::arg("image"), py::arg("src"), py::arg("dst"))
         // No stage argument: the Pipeline already records which stages its push
         // constant range covers, so repeating it could only ever be wrong.
         .def("push_constants", [](std::shared_ptr<CommandBuffer> self, std::shared_ptr<Pipeline> pipeline,

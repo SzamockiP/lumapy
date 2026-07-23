@@ -147,6 +147,57 @@ def test_empty_cubemap_compute_filled_then_sampled(ctx, fullscreen_vert):
             f"face {i}: {target.read_pixels()[4, 4, :3]}"
 
 
+# ── bake once, sample later: the manual image barrier ──────────────────────
+
+
+def test_compute_baked_cubemap_sampled_in_a_later_submit(ctx, fullscreen_vert):
+    """cmd.barrier(image, SHADER_WRITE, SHADER_READ) transitions a compute-baked
+    cubemap to sampleable, so a LATER submit can sample it — bake once, sample
+    many. The cross-submit layout is what the automatic tracker can't reach."""
+    comp = ctx.compile_shader(str(SHADER_DIR / "store_array.comp"), bz.ShaderStage.COMPUTE)
+    fill = ctx.compute_pipeline().shader(comp).storage_image(0).build()
+
+    cube = ctx.create_image(16, 16, bz.Format.RGBA8, cube=True)
+    fill_set = ctx.create_descriptor_pool(max_sets=1, storage_images=1).allocate_set(fill, set=0)
+    fill_set.set_storage_image(0, cube)
+
+    # Bake once: fill every face, then transition to sampleable — its own submit.
+    bake = ctx.create_command_buffer()
+    bake.begin()
+    bake.bind_pipeline(fill).bind_descriptor_set(fill_set, fill, set=0).dispatch(2, 2, 6)
+    bake.barrier(cube, bz.Access.SHADER_WRITE, bz.Access.SHADER_READ)
+    ctx.submit(bake)
+
+    # Sample in separate submits, no regeneration — each face keeps its colour.
+    target = bz.RenderTarget(ctx, 8, 8)
+    pipeline = _cube_sampler(ctx, fullscreen_vert, target)
+    sample_set = ctx.create_descriptor_pool(max_sets=1, samplers=1).allocate_set(pipeline, set=0)
+    sample_set.set_image(0, cube)
+
+    for i, direction in enumerate(FACE_DIRS):
+        cmd = ctx.create_command_buffer()
+        cmd.begin()
+        cmd.begin_rendering(target)
+        cmd.bind_pipeline(pipeline).bind_descriptor_set(sample_set, pipeline, set=0)
+        cmd.push_constants(pipeline, 0, struct.pack("4f", *direction, 0.0))
+        cmd.draw(3)
+        cmd.end_rendering(target)
+        ctx.submit(cmd)
+        expected = [round(i / 5 * 255), 64, 128]
+        assert np.allclose(target.read_pixels()[4, 4, :3], expected, atol=2), \
+            f"face {i}: {target.read_pixels()[4, 4, :3]}"
+
+
+def test_image_barrier_rejects_non_shader_access(ctx):
+    """The image barrier's layout follows the access; only the two shader
+    accesses name an image layout."""
+    cube = ctx.create_image(8, 8, bz.Format.RGBA8, cube=True)
+    cmd = ctx.create_command_buffer()
+    cmd.begin()
+    with pytest.raises(bz.ResourceError):
+        cmd.barrier(cube, bz.Access.VERTEX_READ, bz.Access.SHADER_READ)
+
+
 # ── validation: the cube flag and layer consistency are enforced ───────────
 
 

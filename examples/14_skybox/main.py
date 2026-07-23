@@ -4,15 +4,14 @@
     image with a CUBE view (for sampling) and a 2D_ARRAY view (for storage);
   * a compute shader fills all six faces with imageStore, writing through the
     2D_ARRAY storage view — no vertices, no fragment shader;
+  * the cubemap is baked ONCE, up front: a compute dispatch fills the faces,
+    then cmd.barrier(cubemap, SHADER_WRITE, SHADER_READ) transitions all six
+    layers from GENERAL (storage) to SHADER_READ_ONLY (sampled). After that the
+    render loop just samples it every frame — no regeneration;
   * a fullscreen pass turns each pixel into a world-space ray and samples the
-    cubemap as a samplerCube. The barrier taking the image from GENERAL
-    (storage, all six layers) to SHADER_READ_ONLY (sampled) is recorded for you
-    and hoisted before the render pass — no cmd.barrier() by hand.
+    cubemap as a samplerCube.
 
-The sky is regenerated each frame purely to keep the example one command buffer
-(a static sky could be generated once, but pinning its layout across submits
-would need a manual image barrier the API doesn't expose yet). The camera
-slowly rotates so the cubemap is visibly all around you.
+The camera slowly rotates so the cubemap is visibly all around you.
 """
 
 import math
@@ -87,11 +86,20 @@ def camera_push(t):
         TAN_HALF_FOV, ASPECT, 0.0, 0.0)
 
 
+# Bake the cubemap once: fill every face in compute, then transition all six
+# layers from GENERAL (storage) to SHADER_READ_ONLY (sampled) by hand. A
+# blocking headless submit, so it's done before the loop starts.
+setup = ctx.create_command_buffer()
+setup.begin()
+(setup.bind_pipeline(generate)
+      .bind_descriptor_set(gen_set, generate, set=0)
+      .dispatch((SKY + 7) // 8, (SKY + 7) // 8, 6))
+setup.barrier(cubemap, bz.Access.SHADER_WRITE, bz.Access.SHADER_READ)
+ctx.submit(setup)
+
+
 def record(cmd, t):
     cmd.begin()
-    (cmd.bind_pipeline(generate)
-        .bind_descriptor_set(gen_set, generate, set=0)
-        .dispatch((SKY + 7) // 8, (SKY + 7) // 8, 6))
     with cmd.rendering(renderer):
         (cmd.bind_pipeline(skybox)
             .bind_descriptor_set(sky_set, skybox, set=0)

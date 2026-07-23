@@ -479,6 +479,19 @@ class CommandBuffer:
         when auto_barriers=False; legal (if redundant) in auto mode. Refused
         inside a rendering scope — record it before begin_rendering."""
         ...
+    def barrier(self, image: Image, src: Access, dst: Access) -> CommandBuffer:
+        """Transition an image between shader accesses by hand, across every mip
+        and layer. The layout follows the access: SHADER_WRITE = GENERAL (a
+        storage image), SHADER_READ = SHADER_READ_ONLY (a sampled image); other
+        accesses are buffer-only.
+
+        The one case the automatic tracker can't reach is cross-submit: a compute
+        shader bakes an image in one submit (GENERAL) and later frames sample it
+        (SHADER_READ_ONLY). Generate it once, then
+        `cmd.barrier(image, Access.SHADER_WRITE, Access.SHADER_READ)` after the
+        dispatch, and sample it every frame without regenerating. Refused inside
+        a rendering scope."""
+        ...
 
     def push_constants(self, pipeline: Pipeline, offset: int, data: bytes) -> CommandBuffer:
         """The Pipeline already knows which stages its range covers."""
