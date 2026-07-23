@@ -11,7 +11,7 @@
   * a fullscreen pass turns each pixel into a world-space ray and samples the
     cubemap as a samplerCube.
 
-The camera slowly rotates so the cubemap is visibly all around you.
+Move the mouse to look around — the cubemap surrounds you.
 """
 
 import math
@@ -34,6 +34,7 @@ def on_message(msg):
 window = bz.Window(W, H, "Bazalt Demo - Skybox (procedural cubemap)", logger=logger)
 ctx = bz.Context(logger)
 renderer = bz.SwapchainRenderer(window, ctx)
+window.set_cursor_mode(bz.CURSOR_DISABLED)  # mouse-look
 
 # Compute writes the six faces of an empty cubemap.
 sky_comp = ctx.compile_shader("sky.comp", bz.ShaderStage.COMPUTE)
@@ -73,9 +74,14 @@ TAN_HALF_FOV = math.tan(math.radians(60.0) / 2.0)
 ASPECT = W / H
 
 
-def camera_push(t):
-    yaw = t * 0.25
-    forward = normalize((math.cos(yaw), 0.15 * math.sin(t * 0.5), math.sin(yaw)))
+def camera_push(yaw, pitch):
+    # Look direction straight from the mouse-driven yaw/pitch — same convention
+    # as the Camera in examples 04-07.
+    forward = normalize((
+        math.cos(yaw) * math.cos(pitch),
+        math.sin(pitch),
+        math.sin(yaw) * math.cos(pitch),
+    ))
     right = normalize(cross(forward, (0.0, 1.0, 0.0)))
     up = cross(right, forward)
     return struct.pack(
@@ -98,21 +104,45 @@ setup.barrier(cubemap, bz.Access.SHADER_WRITE, bz.Access.SHADER_READ)
 ctx.submit(setup)
 
 
-def record(cmd, t):
+def record(cmd, yaw, pitch):
     cmd.begin()
-    with cmd.rendering(renderer):
-        (cmd.bind_pipeline(skybox)
-            .bind_descriptor_set(sky_set, skybox, set=0)
-            .push_constants(skybox, 0, camera_push(t))
-            .draw(3))
+    with cmd.rendering(renderer) as c:
+        (c.bind_pipeline(skybox)
+          .bind_descriptor_set(sky_set, skybox, set=0)
+          .push_constants(skybox, 0, camera_push(yaw, pitch))
+          .draw(3))
 
 
 cmd = ctx.create_command_buffer()
-start = time.time()
+yaw, pitch = 0.0, 0.0
+last_mouse_dx = 0.0
+last_mouse_dy = 0.0
+last_time = time.time()
+frame_count = 0
+fps_timer = 0.0
 while window.is_open():
     window.poll_events()
     frame = renderer.begin_frame()
     if frame is None:
         continue
-    record(cmd, time.time() - start)
+
+    current_time = time.time()
+    dt = current_time - last_time
+    last_time = current_time
+    frame_count += 1
+    fps_timer += dt
+    if fps_timer >= 1.0:
+        avg_fps = frame_count / fps_timer
+        window.set_title(f"Bazalt Demo - Skybox (procedural cubemap) | {1000.0 / avg_fps:.2f} ms/frame | {avg_fps:.1f} FPS")
+        frame_count = 0
+        fps_timer = 0.0
+
+    mouse = window.get_mouse_state()
+    dx = mouse.dx - last_mouse_dx
+    dy = mouse.dy - last_mouse_dy
+    last_mouse_dx, last_mouse_dy = mouse.dx, mouse.dy
+    yaw += dx * 0.002
+    pitch = max(-math.pi / 2 + 0.01, min(math.pi / 2 - 0.01, pitch + dy * 0.002))
+
+    record(cmd, yaw, pitch)
     frame.submit(cmd)

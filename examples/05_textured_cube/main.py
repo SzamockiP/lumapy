@@ -134,21 +134,17 @@ crate_set.set_image(0, tex2)
 # Record commands
 cmd = ctx.create_command_buffer()
 cmd.begin()
-cmd.begin_rendering(renderer, clear_color=[0.1, 0.2, 0.3, 1.0])
-cmd.bind_pipeline(pipeline)
-cmd.bind_descriptor_set(frame_set, pipeline, set=0)
-cmd.bind_vertex_buffer(vbuf)
-cmd.bind_index_buffer(ibuf)
-
-# Bricks (18 indices)
-cmd.bind_descriptor_set(bricks_set, pipeline, set=1)
-cmd.draw_indexed(18, first_index=0)
-
-# Crate (18 indices)
-cmd.bind_descriptor_set(crate_set, pipeline, set=1)
-cmd.draw_indexed(18, first_index=18)
-
-cmd.end_rendering(renderer)
+with cmd.rendering(renderer, clear_color=[0.1, 0.2, 0.3, 1.0]) as c:
+    (c.bind_pipeline(pipeline)
+      .bind_descriptor_set(frame_set, pipeline, set=0)
+      .bind_vertex_buffer(vbuf)
+      .bind_index_buffer(ibuf)
+      # Bricks: first 18 indices
+      .bind_descriptor_set(bricks_set, pipeline, set=1)
+      .draw_indexed(18, first_index=0)
+      # Crate: next 18 indices
+      .bind_descriptor_set(crate_set, pipeline, set=1)
+      .draw_indexed(18, first_index=18))
 
 # Main loop
 camera = Camera(pos=(0.0, 0.0, 3.0), speed=2.5)

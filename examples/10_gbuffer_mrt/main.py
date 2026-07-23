@@ -85,29 +85,41 @@ comp_set.set_image(1, gbuffer.color[1])  # albedo
 cmd = ctx.create_command_buffer()
 cmd.begin()
 
-cmd.begin_rendering(gbuffer, clear_color=[0.0, 0.0, 0.0, 0.0])
-cmd.bind_pipeline(gbuf_pipe)
-cmd.bind_descriptor_set(gbuf_set, gbuf_pipe, set=0)
-cmd.bind_vertex_buffer(vbuf)
-cmd.bind_index_buffer(ibuf)
-cmd.draw_indexed(len(idx))
-cmd.end_rendering(gbuffer)
+with cmd.rendering(gbuffer, clear_color=[0.0, 0.0, 0.0, 0.0]) as c:
+    (c.bind_pipeline(gbuf_pipe)
+      .bind_descriptor_set(gbuf_set, gbuf_pipe, set=0)
+      .bind_vertex_buffer(vbuf)
+      .bind_index_buffer(ibuf)
+      .draw_indexed(len(idx)))
 
-cmd.begin_rendering(renderer, clear_color=[0.05, 0.07, 0.1, 1.0])
-cmd.bind_pipeline(comp_pipe)
-cmd.bind_descriptor_set(comp_set, comp_pipe, set=0)
-cmd.draw(3)
-cmd.end_rendering(renderer)
+with cmd.rendering(renderer, clear_color=[0.05, 0.07, 0.1, 1.0]) as c:
+    (c.bind_pipeline(comp_pipe)
+      .bind_descriptor_set(comp_set, comp_pipe, set=0)
+      .draw(3))
 
 proj = glm.perspectiveRH_ZO(glm.radians(45.0), WIDTH / HEIGHT, 0.1, 100.0)
 proj[1][1] *= -1
 view = glm.lookAt(glm.vec3(0.0, 1.2, 3.0), glm.vec3(0.0), glm.vec3(0.0, 1.0, 0.0))
 
 start = time.time()
+last_time = start
+frame_count = 0
+fps_timer = 0.0
 while window.is_open():
     window.poll_events()
     if frame := renderer.begin_frame():
-        t = time.time() - start
+        current_time = time.time()
+        dt = current_time - last_time
+        last_time = current_time
+        frame_count += 1
+        fps_timer += dt
+        if fps_timer >= 1.0:
+            avg_fps = frame_count / fps_timer
+            window.set_title(f"Bazalt Demo - G-Buffer MRT | {1000.0 / avg_fps:.2f} ms/frame | {avg_fps:.1f} FPS")
+            frame_count = 0
+            fps_timer = 0.0
+
+        t = current_time - start
         model = glm.rotate(glm.mat4(1.0), t * 0.8, glm.vec3(0.0, 1.0, 0.0))
         model = glm.rotate(model, t * 0.3, glm.vec3(1.0, 0.0, 0.0))
         mvp = proj * view * model

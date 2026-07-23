@@ -14,8 +14,8 @@ renderer = bz.SwapchainRenderer(window, ctx)
 # Record command buffer once
 cmd = ctx.create_command_buffer()
 cmd.begin()
-cmd.begin_rendering(renderer, clear_color=[0.1, 0.1, 0.1, 1.0])
-cmd.end_rendering(renderer)
+with cmd.rendering(renderer, clear_color=[0.1, 0.1, 0.1, 1.0]):
+    pass  # nothing to draw — the pass just clears the swapchain
 
 # Main loop
 last_time = time.time()

@@ -1,5 +1,6 @@
 import sys
 import os
+import time
 from PyQt6.QtWidgets import QApplication, QWidget
 from PyQt6.QtCore import QTimer
 import bazalt as bz
@@ -26,7 +27,12 @@ class VulkanWidget(QWidget):
         self.timer = QTimer(self)
         self.timer.timeout.connect(self.tick)
         self.timer.start(16)  # ~60 FPS
-        
+
+        # FPS shown in the Qt window title, like the GLFW examples.
+        self._last_time = time.time()
+        self._frame_count = 0
+        self._fps_timer = 0.0
+
     def setup_vulkan(self):
         # Paths to shaders
         script_dir = os.path.dirname(os.path.abspath(__file__))
@@ -57,16 +63,25 @@ class VulkanWidget(QWidget):
         # Record commands
         self.cmd = self.ctx.create_command_buffer()
         self.cmd.begin()
-        self.cmd.begin_rendering(self.renderer, clear_color=[0.15, 0.15, 0.2, 1.0])
-        self.cmd.bind_pipeline(self.pipeline)
-        self.cmd.bind_vertex_buffer(self.vbuf)
-        self.cmd.bind_index_buffer(self.ibuf)
-        self.cmd.draw_indexed(3)
-        self.cmd.end_rendering(self.renderer)
+        with self.cmd.rendering(self.renderer, clear_color=[0.15, 0.15, 0.2, 1.0]) as c:
+            (c.bind_pipeline(self.pipeline)
+              .bind_vertex_buffer(self.vbuf)
+              .bind_index_buffer(self.ibuf)
+              .draw_indexed(3))
         
     def tick(self):
         # begin_frame acquires swapchain image and handles automatic resize recreation
         if frame := self.renderer.begin_frame():
+            now = time.time()
+            self._fps_timer += now - self._last_time
+            self._last_time = now
+            self._frame_count += 1
+            if self._fps_timer >= 1.0:
+                fps = self._frame_count / self._fps_timer
+                self.setWindowTitle(
+                    f"Bazalt PyQt6 Integration Demo | {1000.0 / fps:.2f} ms/frame | {fps:.1f} FPS")
+                self._frame_count = 0
+                self._fps_timer = 0.0
             frame.submit(self.cmd)
 
 if __name__ == "__main__":
