@@ -118,6 +118,80 @@ public:
 		return image;
 	}
 
+	// Main thread: a layered async load (texture array or cubemap) from N files.
+	// Validates every header synchronously (all faces must share a size), builds
+	// the empty layered image, and hands the decode + concatenate + single upload
+	// to the worker. One batch unit, exactly like a single load.
+	std::expected<std::shared_ptr<Image>, Error> load_layered(
+		const std::vector<std::string>& paths, bool cube)
+	{
+		if (paths.empty())
+		{
+			return std::unexpected(err_resource("load_image: the path list is empty"));
+		}
+		if (cube && paths.size() != 6)
+		{
+			return std::unexpected(err_resource(std::format(
+				"load_image(cube=True): a cubemap needs exactly 6 faces, got {}", paths.size())));
+		}
+
+		int width = 0, height = 0, comp = 0;
+		for (std::size_t i = 0; i < paths.size(); ++i)
+		{
+			int w = 0, h = 0, c = 0;
+			if (!stbi_info(paths[i].c_str(), &w, &h, &c))
+			{
+				const char* reason = stbi_failure_reason();
+				return std::unexpected(err_resource(reason
+					? std::format("Failed to load image: {} ({})", paths[i], reason)
+					: std::format("Failed to load image: {}", paths[i])));
+			}
+			if (i == 0)
+			{
+				width = w;
+				height = h;
+			}
+			else if (w != width || h != height)
+			{
+				return std::unexpected(err_resource(std::format(
+					"load_image: every layer must be the same size; {} is {}x{}, expected {}x{}",
+					paths[i], w, h, width, height)));
+			}
+		}
+		if (cube && width != height)
+		{
+			return std::unexpected(err_resource(std::format(
+				"load_image(cube=True): faces must be square, got {}x{}", width, height)));
+		}
+
+		const Format format = Format::RGBA8_SRGB;
+		const std::uint32_t mips = Image::can_generate_mips(context_, format)
+			? Image::full_mip_count(static_cast<std::uint32_t>(width),
+			                        static_cast<std::uint32_t>(height))
+			: 1;
+
+		auto image = Image::create_empty(context_, static_cast<std::uint32_t>(width),
+		                                 static_cast<std::uint32_t>(height), format, mips,
+		                                 static_cast<std::uint32_t>(paths.size()), cube);
+		if (!image)
+		{
+			return image;
+		}
+		(*image)->set_upload_pending();
+
+		{
+			std::lock_guard lock(mutex_);
+			++batch_started_;
+			Job job;
+			job.image = *image;
+			job.mips = mips;
+			job.layers = paths;
+			jobs_.push_back(std::move(job));
+		}
+		cv_.notify_all();
+		return image;
+	}
+
 	// Hot reload: re-decode `path` into the EXISTING image. The header is NOT
 	// re-validated here — this is called from the watcher drain, and a bad file
 	// must not throw; the worker decodes, checks the size, and on any problem
@@ -202,6 +276,9 @@ private:
 		// image Failed, and stays out of the batch counters — a re-saved texture
 		// must not make a loading bar jump.
 		bool reload = false;
+		// Non-empty → a layered load (texture array / cubemap): these paths, one
+		// per layer, decode into one N-layer staging buffer and one submit.
+		std::vector<std::string> layers;
 	};
 
 	// Both counters below describe the current batch. A batch is every upload
@@ -251,6 +328,11 @@ private:
 
 	void process_(Job& job)
 	{
+		if (!job.layers.empty())
+		{
+			process_layered_(job);
+			return;
+		}
 		// Decode. Forcing RGBA to match the RGBA8_SRGB image.
 		int width = 0, height = 0, channels = 0;
 		stbi_uc* pixels = stbi_load(job.path.c_str(), &width, &height, &channels, STBI_rgb_alpha);
@@ -377,6 +459,117 @@ private:
 		// accounting; a reload deliberately does not (see Job::reload).
 		job.image->set_upload_submitted(serial);
 		if (!job.reload)
+		{
+			std::lock_guard lock(mutex_);
+			submitted_serials_.push_back(serial);
+		}
+	}
+
+	// A layered load: decode every face into one contiguous N-layer block, then
+	// the exact same staging → copy → mipgen → submit path as a single upload
+	// (Image handles the per-layer copy). Layered loads are never hot reloads,
+	// so this mirrors process_'s non-reload tail without the reload branches.
+	void process_layered_(Job& job)
+	{
+		const std::uint32_t w = job.image->width();
+		const std::uint32_t h = job.image->height();
+		const std::size_t layer_bytes = static_cast<std::size_t>(w) * h * 4;  // RGBA8
+
+		std::vector<stbi_uc> pixels(layer_bytes * job.layers.size());
+		for (std::size_t i = 0; i < job.layers.size(); ++i)
+		{
+			int lw = 0, lh = 0, lc = 0;
+			stbi_uc* p = stbi_load(job.layers[i].c_str(), &lw, &lh, &lc, STBI_rgb_alpha);
+			if (!p)
+			{
+				fail_(job, stbi_failure_reason());
+				return;
+			}
+			if (static_cast<std::uint32_t>(lw) != w || static_cast<std::uint32_t>(lh) != h)
+			{
+				// A face changed between the load_layered header check and now.
+				stbi_image_free(p);
+				fail_(job, "a layer changed size on disk while it was being loaded");
+				return;
+			}
+			std::memcpy(pixels.data() + i * layer_bytes, p, layer_bytes);
+			stbi_image_free(p);
+		}
+
+		auto staging = job.image->create_filled_staging(context_, pixels.data());
+		if (!staging)
+		{
+			fail_(job, staging.error().message.c_str());
+			return;
+		}
+		auto [stagingBuffer, stagingAllocation] = *staging;
+
+		VkCommandBufferAllocateInfo allocInfo{
+			.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
+			.pNext = nullptr,
+			.commandPool = pool_,
+			.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY,
+			.commandBufferCount = 1
+		};
+		VkCommandBuffer cmd = VK_NULL_HANDLE;
+		if (vkAllocateCommandBuffers(context_.device(), &allocInfo, &cmd) != VK_SUCCESS)
+		{
+			vmaDestroyBuffer(context_.allocator(), stagingBuffer, stagingAllocation);
+			fail_(job, "failed to allocate an upload command buffer");
+			return;
+		}
+
+		VkCommandBufferBeginInfo beginInfo{
+			.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
+			.pNext = nullptr,
+			.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT,
+			.pInheritanceInfo = nullptr
+		};
+		vkBeginCommandBuffer(cmd, &beginInfo);
+		job.image->record_upload_commands(cmd, stagingBuffer, job.mips);
+		vkEndCommandBuffer(cmd);
+
+		std::uint64_t serial = 0;
+		{
+			std::lock_guard lock(context_.queue_mutex());
+			serial = context_.advance_submit_serial();
+
+			VkSemaphore timeline = context_.submit_timeline();
+			VkTimelineSemaphoreSubmitInfo timelineInfo{
+				.sType = VK_STRUCTURE_TYPE_TIMELINE_SEMAPHORE_SUBMIT_INFO,
+				.pNext = nullptr,
+				.waitSemaphoreValueCount = 0,
+				.pWaitSemaphoreValues = nullptr,
+				.signalSemaphoreValueCount = 1,
+				.pSignalSemaphoreValues = &serial
+			};
+			VkSubmitInfo submitInfo{
+				.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO,
+				.pNext = &timelineInfo,
+				.waitSemaphoreCount = 0,
+				.pWaitSemaphores = nullptr,
+				.pWaitDstStageMask = nullptr,
+				.commandBufferCount = 1,
+				.pCommandBuffers = &cmd,
+				.signalSemaphoreCount = 1,
+				.pSignalSemaphores = &timeline
+			};
+			if (vkQueueSubmit(context_.graphics_queue(), 1, &submitInfo, VK_NULL_HANDLE) != VK_SUCCESS)
+			{
+				vmaDestroyBuffer(context_.allocator(), stagingBuffer, stagingAllocation);
+				vkFreeCommandBuffers(context_.device(), pool_, 1, &cmd);
+				fail_(job, "failed to submit the upload command buffer");
+				return;
+			}
+		}
+
+		context_.defer_destroy(
+			[allocator = context_.allocator(), stagingBuffer, stagingAllocation] {
+				vmaDestroyBuffer(allocator, stagingBuffer, stagingAllocation);
+			});
+		retired_.emplace_back(serial, cmd);
+
+		job.image->set_upload_submitted(serial);
 		{
 			std::lock_guard lock(mutex_);
 			submitted_serials_.push_back(serial);

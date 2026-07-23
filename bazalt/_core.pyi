@@ -260,7 +260,8 @@ class ShaderModule:
         ...
 
 class Image:
-    """A GPU image: pixels + format. The sampler it used to be fused with is a
+    """A GPU image: pixels + format. May be 2D, a texture array (array_layers >
+    1) or a cubemap (is_cube). The sampler it used to be fused with is a
     separate (cached) object — see Context.create_sampler."""
 
     @property
@@ -271,6 +272,15 @@ class Image:
     def format(self) -> Format: ...
     @property
     def mip_levels(self) -> int: ...
+    @property
+    def array_layers(self) -> int:
+        """Number of layers: 1 for a plain 2D image, N for a texture array,
+        6 for a cubemap."""
+        ...
+    @property
+    def is_cube(self) -> bool:
+        """True for a cubemap (sampled through a CUBE view as samplerCube)."""
+        ...
     @property
     def ready(self) -> bool:
         """Non-blocking: is the pixel data on the GPU?
@@ -289,7 +299,8 @@ class Image:
         ...
 
     def read(self) -> Any:
-        """Copy mip 0 back to host memory as a numpy array.
+        """Copy mip 0 back to host memory as a numpy array (layer 0 for a
+        texture array / cubemap — sample the other layers to inspect them).
 
         Shape is (height, width, channels) — or (height, width) for
         single-channel formats — and the dtype follows the format (uint8,
@@ -651,6 +662,15 @@ class Context:
         """
         ...
 
+    def load_image(self, paths: Sequence[str], *, cube: bool = False,
+                   name: str = "") -> Image:
+        """From a list of image files → a layered image (async, sRGB + mips): a
+        texture array, or a cubemap when `cube=True` (6 square faces, order
+        +X,-X,+Y,-Y,+Z,-Z). Every face must share a size. Returns immediately
+        like the single-file load; hot reload is not wired for layered images
+        in v1 (a re-saved face keeps the loaded contents)."""
+        ...
+
     @property
     def uploads_done(self) -> bool:
         """Non-blocking: have all load_image uploads finished?"""
@@ -673,12 +693,25 @@ class Context:
         """Block until every pending load_image upload has finished."""
         ...
     def create_image(self, width: int, height: int,
-                     format: Format = Format.RGBA8, *, name: str = "") -> Image: ...
-    def create_image(self, array: Any, *, name: str = "") -> Image:
-        """From a numpy array; shape + dtype pick the format (UNORM — arrays
-        are data, files are pictures). (h, w, 3) has no portable GPU format
-        and raises ResourceError with a padding hint.
-        """
+                     format: Format = Format.RGBA8, *, layers: int = 1,
+                     cube: bool = False, name: str = "") -> Image:
+        """Empty image on the GPU. `layers > 1` makes a texture array (view
+        2D_ARRAY); `cube=True` makes a cubemap (6 square faces, view CUBE). An
+        empty layered image is filled by rendering into it or by a compute
+        storage image (procedural skyboxes/arrays); the data forms below upload
+        pixels instead."""
+        ...
+    def create_image(self, array: Any, *, cube: bool = False, name: str = "") -> Image:
+        """From one numpy array → a 2D image; shape + dtype pick the format
+        (UNORM — arrays are data, files are pictures). (h, w, 3) has no portable
+        GPU format and raises ResourceError with a padding hint. `cube=True`
+        here is a mistake — a cubemap needs 6 faces, so pass a list (below)."""
+        ...
+    def create_image(self, images: Sequence[Any], *, cube: bool = False,
+                     name: str = "") -> Image:
+        """From a list of numpy arrays → a layered image: a texture array, or a
+        cubemap when `cube=True` (exactly 6 square faces, order
+        +X,-X,+Y,-Y,+Z,-Z). Every layer must share shape and dtype."""
         ...
     def create_sampler(self, filter: Filter = Filter.LINEAR,
                        address_mode: AddressMode = AddressMode.REPEAT,

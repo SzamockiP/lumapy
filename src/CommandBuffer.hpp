@@ -595,7 +595,9 @@ private:
                     .baseMipLevel = 0,
                     .levelCount = image->mip_levels(),
                     .baseArrayLayer = 0,
-                    .layerCount = 1
+                    // All layers transition together: the tracker holds one
+                    // layout per image, and a cube/array is used as a whole.
+                    .layerCount = image->array_layers()
                 }
             };
             vkCmdPipelineBarrier(cmd, b.src_stages, b.dst_stages, 0, 0, nullptr, 0, nullptr, 1, &barrier);

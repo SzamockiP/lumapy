@@ -231,6 +231,50 @@ size_t contiguous_nbytes(const py::buffer_info& info, const char* what)
     return static_cast<size_t>(info.size) * static_cast<size_t>(info.itemsize);
 }
 
+// One (h, w) or (h, w, channels) array → its GPU Format + dimensions. UNORM,
+// never sRGB (arrays are data, files are pictures). Raises a ResourceError on
+// an unsupported dtype/shape. Shared by the single-image and layered
+// (texture array / cubemap) create_image paths.
+struct ArrayImageSpec { Format format; uint32_t width; uint32_t height; };
+ArrayImageSpec array_image_spec(const py::buffer_info& info)
+{
+    if (info.ndim != 2 && info.ndim != 3) {
+        raise_error(err_resource(std::format(
+            "create_image expects a (h, w) or (h, w, channels) array, got {} dimensions",
+            info.ndim)));
+    }
+    const auto height = static_cast<uint32_t>(info.shape[0]);
+    const auto width = static_cast<uint32_t>(info.shape[1]);
+    const py::ssize_t channels = info.ndim == 3 ? info.shape[2] : 1;
+
+    std::optional<Format> format;
+    if (info.format == "B") {          // uint8
+        if (channels == 1) format = Format::R8;
+        else if (channels == 2) format = Format::RG8;
+        else if (channels == 4) format = Format::RGBA8;
+    } else if (info.format == "e") {   // float16
+        if (channels == 1) format = Format::R16F;
+        else if (channels == 4) format = Format::RGBA16F;
+    } else if (info.format == "f") {   // float32
+        if (channels == 1) format = Format::R32F;
+        else if (channels == 4) format = Format::RGBA32F;
+    }
+
+    if (!format) {
+        if (channels == 3) {
+            raise_error(err_resource(
+                "create_image: 3-channel images have no portable GPU format; "
+                "pad to 4 channels first, e.g. "
+                "np.concatenate([arr, np.full_like(arr[..., :1], 255)], axis=-1)"));
+        }
+        raise_error(err_resource(std::format(
+            "create_image: unsupported dtype/shape (dtype '{}', {} channel(s)). "
+            "Supported: uint8 x 1/2/4 channels, float16 x 1/4, float32 x 1/4",
+            info.format, channels)));
+    }
+    return { *format, width, height };
+}
+
 const char* severity_name(Severity severity)
 {
     switch (severity)
@@ -696,6 +740,8 @@ PYBIND11_MODULE(_core, m) {
         .def_property_readonly("height", &Image::height)
         .def_property_readonly("format", &Image::format)
         .def_property_readonly("mip_levels", &Image::mip_levels)
+        .def_property_readonly("array_layers", &Image::array_layers)
+        .def_property_readonly("is_cube", &Image::is_cube)
         .def_property_readonly("ready", &Image::ready)
         .def("wait", [](Image& self) {
             std::expected<void, Error> r;
@@ -1093,6 +1139,21 @@ PYBIND11_MODULE(_core, m) {
             if (auto* hr = self.hot_reload()) hr->watch_image(image, path);
             return py::cast(image);
         }, py::arg("path"), py::kw_only(), py::arg("name") = "")
+        // A list of paths → a layered image loaded from files: texture array
+        // (cube=False) or cubemap (cube=True, 6 square faces, order
+        // +X,-X,+Y,-Y,+Z,-Z). Async like the single-file load, one batch unit.
+        // Hot reload is not wired for layered images (v1): a re-saved face keeps
+        // the loaded contents.
+        .def("load_image", [](Context& self, const std::vector<std::string>& paths,
+                              bool cube, const std::string& name) -> py::object {
+            if (!self.upload_manager()) {
+                self.set_upload_manager(std::make_unique<UploadManager>(self));
+            }
+            auto* manager = static_cast<UploadManager*>(self.upload_manager());
+            auto image = unwrap(manager->load_layered(paths, cube), self.logger().get());
+            name_object(self, VK_OBJECT_TYPE_IMAGE, image->vk_image(), name);
+            return py::cast(image);
+        }, py::arg("paths"), py::kw_only(), py::arg("cube") = false, py::arg("name") = "")
         .def_property_readonly("uploads_done", [](const Context& self) {
             return self.upload_manager() ? self.upload_manager()->uploads_done() : true;
         })
@@ -1107,60 +1168,96 @@ PYBIND11_MODULE(_core, m) {
                 self.upload_manager()->wait_all();
             }
         })
-        // Registered before the buffer overload so two ints never reach the
-        // buffer protocol.
-        .def("create_image", [](Context& self, uint32_t width, uint32_t height, Format format, const std::string& name) -> py::object {
-            auto image = unwrap(Image::create_empty(self, width, height, format), self.logger().get());
+        // Registered before the buffer/list overloads so two ints never reach
+        // the buffer protocol. Empty image: 2D, a texture array (layers>1), or a
+        // cubemap (cube=True → 6 square faces). Filled by rendering into it or by
+        // a compute storage image (procedural skyboxes/arrays); the data forms
+        // below upload pixels.
+        .def("create_image", [](Context& self, uint32_t width, uint32_t height, Format format,
+                                uint32_t layers, bool cube, const std::string& name) -> py::object {
+            if (cube) {
+                if (layers != 1 && layers != 6) {
+                    raise_error(err_resource(std::format(
+                        "create_image(cube=True) implies 6 layers; drop layers= or pass layers=6, got {}", layers)));
+                }
+                if (width != height) {
+                    raise_error(err_resource(std::format(
+                        "create_image(cube=True): a cubemap needs square faces, got {}x{}", width, height)));
+                }
+                layers = 6;
+            }
+            auto image = unwrap(Image::create_empty(self, width, height, format, 1, layers, cube),
+                                self.logger().get());
             name_object(self, VK_OBJECT_TYPE_IMAGE, image->vk_image(), name);
             return py::cast(image);
-        }, py::arg("width"), py::arg("height"), py::arg("format") = Format::RGBA8, py::kw_only(), py::arg("name") = "")
-        .def("create_image", [](Context& self, py::buffer b, const std::string& name) -> py::object {
+        }, py::arg("width"), py::arg("height"), py::arg("format") = Format::RGBA8,
+           py::kw_only(), py::arg("layers") = 1, py::arg("cube") = false, py::arg("name") = "")
+        // A single (h,w[,c]) array → a 2D image. cube=True here is a mistake: a
+        // cubemap needs six faces, so point the caller at the list form.
+        .def("create_image", [](Context& self, py::buffer b, bool cube, const std::string& name) -> py::object {
+            if (cube) {
+                raise_error(err_resource(
+                    "create_image(cube=True): a cubemap needs 6 square faces — pass a list of 6 arrays, "
+                    "e.g. create_image([px, nx, py, ny, pz, nz], cube=True)"));
+            }
             py::buffer_info info = b.request();
             contiguous_nbytes(info, "create_image");
-
-            if (info.ndim != 2 && info.ndim != 3) {
-                raise_error(err_resource(std::format(
-                    "create_image expects a (h, w) or (h, w, channels) array, got {} dimensions",
-                    info.ndim)));
-            }
-            const auto height = static_cast<uint32_t>(info.shape[0]);
-            const auto width = static_cast<uint32_t>(info.shape[1]);
-            const py::ssize_t channels = info.ndim == 3 ? info.shape[2] : 1;
-
-            // shape + dtype -> Format. UNORM, never sRGB: arrays are data,
-            // files are pictures — the sRGB default belongs to load_image.
-            std::optional<Format> format;
-            if (info.format == "B") {          // uint8
-                if (channels == 1) format = Format::R8;
-                else if (channels == 2) format = Format::RG8;
-                else if (channels == 4) format = Format::RGBA8;
-            } else if (info.format == "e") {   // float16
-                if (channels == 1) format = Format::R16F;
-                else if (channels == 4) format = Format::RGBA16F;
-            } else if (info.format == "f") {   // float32
-                if (channels == 1) format = Format::R32F;
-                else if (channels == 4) format = Format::RGBA32F;
-            }
-
-            if (!format) {
-                if (channels == 3) {
-                    raise_error(err_resource(
-                        "create_image: 3-channel images have no portable GPU format; "
-                        "pad to 4 channels first, e.g. "
-                        "np.concatenate([arr, np.full_like(arr[..., :1], 255)], axis=-1)"));
-                }
-                raise_error(err_resource(std::format(
-                    "create_image: unsupported dtype/shape (dtype '{}', {} channel(s)). "
-                    "Supported: uint8 x 1/2/4 channels, float16 x 1/4, float32 x 1/4",
-                    info.format, channels)));
-            }
-
+            const ArrayImageSpec spec = array_image_spec(info);
             auto image = unwrap(
-                Image::create_from_pixels(self, info.ptr, width, height, *format),
+                Image::create_from_pixels(self, info.ptr, spec.width, spec.height, spec.format),
                 self.logger().get());
             name_object(self, VK_OBJECT_TYPE_IMAGE, image->vk_image(), name);
             return py::cast(image);
-        }, py::arg("array"), py::kw_only(), py::arg("name") = "")
+        }, py::arg("array"), py::kw_only(), py::arg("cube") = false, py::arg("name") = "")
+        // A list of arrays → a layered image: texture array (cube=False) or
+        // cubemap (cube=True, exactly 6 square faces, order +X,-X,+Y,-Y,+Z,-Z).
+        // Every layer must share shape and dtype.
+        .def("create_image", [](Context& self, py::list images, bool cube, const std::string& name) -> py::object {
+            const size_t layers = images.size();
+            if (layers == 0) {
+                raise_error(err_resource("create_image: the image list is empty"));
+            }
+            if (cube && layers != 6) {
+                raise_error(err_resource(std::format(
+                    "create_image(cube=True): a cubemap needs exactly 6 faces, got {}", layers)));
+            }
+
+            std::vector<py::buffer_info> infos;
+            infos.reserve(layers);
+            for (auto item : images) {
+                infos.push_back(py::cast<py::buffer>(item).request());
+            }
+
+            std::optional<ArrayImageSpec> spec;
+            for (size_t i = 0; i < layers; ++i) {
+                contiguous_nbytes(infos[i], "create_image");
+                const ArrayImageSpec s = array_image_spec(infos[i]);
+                if (!spec) {
+                    spec = s;
+                } else if (s.format != spec->format || s.width != spec->width || s.height != spec->height) {
+                    raise_error(err_resource(std::format(
+                        "create_image: every layer must share shape and dtype; layer {} differs", i)));
+                }
+            }
+            if (cube && spec->width != spec->height) {
+                raise_error(err_resource(std::format(
+                    "create_image(cube=True): faces must be square, got {}x{}", spec->width, spec->height)));
+            }
+
+            // Concatenate the layers into one contiguous block: a layered
+            // buffer→image copy reads them consecutively from offset 0.
+            const size_t layer_bytes = static_cast<size_t>(infos[0].size) * infos[0].itemsize;
+            std::vector<std::byte> pixels(layer_bytes * layers);
+            for (size_t i = 0; i < layers; ++i) {
+                std::memcpy(pixels.data() + i * layer_bytes, infos[i].ptr, layer_bytes);
+            }
+
+            auto image = unwrap(Image::create_layered_from_pixels(
+                self, pixels.data(), spec->width, spec->height,
+                static_cast<uint32_t>(layers), cube, spec->format), self.logger().get());
+            name_object(self, VK_OBJECT_TYPE_IMAGE, image->vk_image(), name);
+            return py::cast(image);
+        }, py::arg("images"), py::kw_only(), py::arg("cube") = false, py::arg("name") = "")
         .def("create_sampler", [](Context& self, Filter filter, AddressMode address_mode, bool anisotropy,
                                   std::optional<CompareOp> compare) -> py::object {
             // Cached: identical descriptions return the identical object.
