@@ -27,7 +27,8 @@ inline void record_image_transition(VkCommandBuffer cmd, VkImage image,
 	VkAccessFlags srcAccess, VkAccessFlags dstAccess,
 	VkPipelineStageFlags srcStage, VkPipelineStageFlags dstStage,
 	VkImageAspectFlags aspect = VK_IMAGE_ASPECT_COLOR_BIT,
-	std::uint32_t baseMip = 0, std::uint32_t mipCount = 1)
+	std::uint32_t baseMip = 0, std::uint32_t mipCount = 1,
+	std::uint32_t layerCount = 1)
 {
 	VkImageMemoryBarrier barrier{
 		.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
@@ -44,7 +45,7 @@ inline void record_image_transition(VkCommandBuffer cmd, VkImage image,
 			.baseMipLevel = baseMip,
 			.levelCount = mipCount,
 			.baseArrayLayer = 0,
-			.layerCount = 1
+			.layerCount = layerCount
 		}
 	};
 	vkCmdPipelineBarrier(cmd, srcStage, dstStage, 0, 0, nullptr, 0, nullptr, 1, &barrier);
@@ -59,10 +60,12 @@ class Image : public std::enable_shared_from_this<Image>
 public:
 	Image(std::shared_ptr<Context> context, VkImage image, VmaAllocation allocation,
 	      VkImageView view, Format format, std::uint32_t width, std::uint32_t height,
-	      std::uint32_t mip_levels)
+	      std::uint32_t mip_levels, std::uint32_t array_layers = 1, bool cube = false,
+	      VkImageView storage_view = VK_NULL_HANDLE)
 		: context_(std::move(context)), image_(image), allocation_(allocation),
-		  view_(view), format_(format), width_(width), height_(height),
-		  mip_levels_(mip_levels) {}
+		  view_(view), storage_view_(storage_view), format_(format), width_(width),
+		  height_(height), mip_levels_(mip_levels), array_layers_(array_layers),
+		  cube_(cube) {}
 
 	// Deferred: an in-flight frame may still sample this image.
 	~Image()
@@ -71,8 +74,11 @@ public:
 		{
 			context_->defer_destroy(
 				[device = context_->device(), allocator = context_->allocator(),
-				 view = view_, image = image_, allocation = allocation_] {
+				 view = view_, storage_view = storage_view_, image = image_, allocation = allocation_] {
 					if (view != VK_NULL_HANDLE) vkDestroyImageView(device, view, nullptr);
+					// A separate 2D_ARRAY view exists only for cubemaps (storage
+					// binding can't use a CUBE view); non-cube images share view_.
+					if (storage_view != VK_NULL_HANDLE) vkDestroyImageView(device, storage_view, nullptr);
 					if (image != VK_NULL_HANDLE && allocation != VK_NULL_HANDLE)
 					{
 						vmaDestroyImage(allocator, image, allocation);
@@ -86,10 +92,16 @@ public:
 
 	VkImage vk_image() const { return image_; }
 	VkImageView view() const { return view_; }
+	// The view a storage-image descriptor binds. For a cubemap this is a
+	// separate 2D_ARRAY view (a CUBE view is illegal as storage); every other
+	// image samples and stores through the same view.
+	VkImageView storage_view() const { return storage_view_ != VK_NULL_HANDLE ? storage_view_ : view_; }
 	Format format() const { return format_; }
 	std::uint32_t width() const { return width_; }
 	std::uint32_t height() const { return height_; }
 	std::uint32_t mip_levels() const { return mip_levels_; }
+	std::uint32_t array_layers() const { return array_layers_; }
+	bool is_cube() const { return cube_; }
 
 	// "Has the GPU ever been given contents for this image" — uploaded, copied
 	// from an array, or rendered into. Readback and sampling of a virgin image
@@ -244,10 +256,12 @@ public:
 	}
 
 	// An empty image: no contents, layout UNDEFINED. The building block for
-	// render-target attachments and array uploads.
+	// render-target attachments and array/cubemap uploads. `array_layers > 1`
+	// makes it a texture array (view 2D_ARRAY); `cube` makes it a cubemap (6
+	// layers, view CUBE + a second 2D_ARRAY view for storage-image writes).
 	static std::expected<std::shared_ptr<Image>, Error> create_empty(
 		Context& context, std::uint32_t width, std::uint32_t height, Format format,
-		std::uint32_t mip_levels = 1)
+		std::uint32_t mip_levels = 1, std::uint32_t array_layers = 1, bool cube = false)
 	{
 		if (width == 0 || height == 0)
 		{
@@ -255,16 +269,21 @@ public:
 				"Image dimensions must be non-zero, got {}x{}", width, height)));
 		}
 		const FormatInfo info = format_info(format);
+		const VkImageAspectFlags aspect = info.depth
+			? VK_IMAGE_ASPECT_DEPTH_BIT : VK_IMAGE_ASPECT_COLOR_BIT;
+		const VkImageViewType view_type = cube
+			? VK_IMAGE_VIEW_TYPE_CUBE
+			: (array_layers > 1 ? VK_IMAGE_VIEW_TYPE_2D_ARRAY : VK_IMAGE_VIEW_TYPE_2D);
 
 		VkImageCreateInfo imageInfo{
 			.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO,
 			.pNext = nullptr,
-			.flags = 0,
+			.flags = static_cast<VkImageCreateFlags>(cube ? VK_IMAGE_CREATE_CUBE_COMPATIBLE_BIT : 0),
 			.imageType = VK_IMAGE_TYPE_2D,
 			.format = info.vk,
 			.extent = { width, height, 1 },
 			.mipLevels = mip_levels,
-			.arrayLayers = 1,
+			.arrayLayers = array_layers,
 			.samples = VK_SAMPLE_COUNT_1_BIT,
 			.tiling = VK_IMAGE_TILING_OPTIMAL,
 			.usage = usage_for(context, format),
@@ -291,14 +310,10 @@ public:
 			.pNext = nullptr,
 			.flags = 0,
 			.image = image,
-			.viewType = VK_IMAGE_VIEW_TYPE_2D,
+			.viewType = view_type,
 			.format = info.vk,
 			.components = {},
-			.subresourceRange = {
-				static_cast<VkImageAspectFlags>(
-					info.depth ? VK_IMAGE_ASPECT_DEPTH_BIT : VK_IMAGE_ASPECT_COLOR_BIT),
-				0, mip_levels, 0, 1
-			}
+			.subresourceRange = { aspect, 0, mip_levels, 0, array_layers }
 		};
 
 		VkImageView view = VK_NULL_HANDLE;
@@ -309,8 +324,25 @@ public:
 			return std::unexpected(*e);
 		}
 
+		// Storage images may not be bound through a CUBE view. Give a cubemap a
+		// parallel 2D_ARRAY view so compute can write its faces (procedural
+		// skyboxes); sampling still goes through the CUBE view above.
+		VkImageView storage_view = VK_NULL_HANDLE;
+		if (cube)
+		{
+			viewInfo.viewType = VK_IMAGE_VIEW_TYPE_2D_ARRAY;
+			if (auto e = check(vkCreateImageView(context.device(), &viewInfo, nullptr, &storage_view),
+			                   std::format("create {} storage view", format_name(format)), ErrorCode::Resource))
+			{
+				vkDestroyImageView(context.device(), view, nullptr);
+				vmaDestroyImage(context.allocator(), image, allocation);
+				return std::unexpected(*e);
+			}
+		}
+
 		return std::make_shared<Image>(context.shared_from_this(), image, allocation,
-		                               view, format, width, height, mip_levels);
+		                               view, format, width, height, mip_levels,
+		                               array_layers, cube, storage_view);
 	}
 
 	// From caller-provided pixels (numpy arrays land here). UNORM by default at
@@ -321,6 +353,26 @@ public:
 		Format format)
 	{
 		auto image = create_empty(context, width, height, format, 1);
+		if (!image)
+		{
+			return image;
+		}
+		if (auto r = (*image)->upload_pixels(context, pixels, 1); !r)
+		{
+			return std::unexpected(r.error());
+		}
+		return image;
+	}
+
+	// A texture array or cubemap from caller-provided pixels: `layers` images of
+	// width×height laid out back to back (layer 0, layer 1, …). UNORM data, one
+	// mip — same policy as create_from_pixels. `cube` picks the CUBE view;
+	// callers (the binding layer) enforce layers==6 and square faces first.
+	static std::expected<std::shared_ptr<Image>, Error> create_layered_from_pixels(
+		Context& context, const void* pixels, std::uint32_t width, std::uint32_t height,
+		std::uint32_t layers, bool cube, Format format)
+	{
+		auto image = create_empty(context, width, height, format, 1, layers, cube);
 		if (!image)
 		{
 			return image;
@@ -474,7 +526,7 @@ public:
 			VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
 			0, VK_ACCESS_TRANSFER_WRITE_BIT,
 			VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
-			VK_IMAGE_ASPECT_COLOR_BIT, 0, mips);
+			VK_IMAGE_ASPECT_COLOR_BIT, 0, mips, array_layers_);
 
 		record_copy_and_finalize_(cmd, staging, mips);
 	}
@@ -491,18 +543,20 @@ public:
 			VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
 			VK_ACCESS_SHADER_READ_BIT, VK_ACCESS_TRANSFER_WRITE_BIT,
 			VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
-			VK_IMAGE_ASPECT_COLOR_BIT, 0, mips);
+			VK_IMAGE_ASPECT_COLOR_BIT, 0, mips, array_layers_);
 
 		record_copy_and_finalize_(cmd, staging, mips);
 	}
 
-	// Creates and fills a staging buffer for this image's mip 0.
+	// Creates and fills a staging buffer for this image's mip 0, all layers
+	// (one image for a plain 2D texture; `array_layers_` images laid out back to
+	// back for an array/cubemap).
 	std::expected<std::pair<VkBuffer, VmaAllocation>, Error> create_filled_staging(
 		Context& context, const void* pixels)
 	{
 		const FormatInfo info = format_info(format_);
 		const VkDeviceSize size =
-			static_cast<VkDeviceSize>(width_) * height_ * info.bytes_per_pixel;
+			static_cast<VkDeviceSize>(width_) * height_ * info.bytes_per_pixel * array_layers_;
 
 		VkBufferCreateInfo stagingInfo{
 			.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
@@ -590,11 +644,14 @@ private:
 	// must already be in TRANSFER_DST across all mips when this runs.
 	void record_copy_and_finalize_(VkCommandBuffer cmd, VkBuffer staging, std::uint32_t mips)
 	{
+		// One region with layerCount = array_layers_ copies every layer: the
+		// staging buffer holds them consecutively, exactly what a layered copy
+		// reads from bufferOffset 0.
 		VkBufferImageCopy region{
 			.bufferOffset = 0,
 			.bufferRowLength = 0,
 			.bufferImageHeight = 0,
-			.imageSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 },
+			.imageSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, array_layers_ },
 			.imageOffset = { 0, 0, 0 },
 			.imageExtent = { width_, height_, 1 }
 		};
@@ -602,14 +659,15 @@ private:
 
 		if (mips > 1)
 		{
-			record_mip_generation(cmd, image_, width_, height_, mips);
+			record_mip_generation(cmd, image_, width_, height_, mips, array_layers_);
 		}
 		else
 		{
 			record_image_transition(cmd, image_,
 				VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
 				VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT,
-				VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT);
+				VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+				VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, array_layers_);
 		}
 	}
 
@@ -619,26 +677,28 @@ private:
 	// in SHADER_READ_ONLY.
 	static void record_mip_generation(VkCommandBuffer cmd, VkImage image,
 	                                  std::uint32_t width, std::uint32_t height,
-	                                  std::uint32_t mips)
+	                                  std::uint32_t mips, std::uint32_t layers = 1)
 	{
 		std::int32_t mip_width = static_cast<std::int32_t>(width);
 		std::int32_t mip_height = static_cast<std::int32_t>(height);
 
+		// Every layer shares mip dimensions, so one blit with layerCount = layers
+		// generates the whole level for all faces/layers at once.
 		for (std::uint32_t i = 1; i < mips; ++i)
 		{
 			record_image_transition(cmd, image,
 				VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
 				VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_TRANSFER_READ_BIT,
 				VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
-				VK_IMAGE_ASPECT_COLOR_BIT, i - 1, 1);
+				VK_IMAGE_ASPECT_COLOR_BIT, i - 1, 1, layers);
 
 			const std::int32_t next_width = mip_width > 1 ? mip_width / 2 : 1;
 			const std::int32_t next_height = mip_height > 1 ? mip_height / 2 : 1;
 
 			VkImageBlit blit{
-				.srcSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, i - 1, 0, 1 },
+				.srcSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, i - 1, 0, layers },
 				.srcOffsets = { { 0, 0, 0 }, { mip_width, mip_height, 1 } },
-				.dstSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, i, 0, 1 },
+				.dstSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, i, 0, layers },
 				.dstOffsets = { { 0, 0, 0 }, { next_width, next_height, 1 } }
 			};
 			vkCmdBlitImage(cmd,
@@ -650,7 +710,7 @@ private:
 				VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
 				VK_ACCESS_TRANSFER_READ_BIT, VK_ACCESS_SHADER_READ_BIT,
 				VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
-				VK_IMAGE_ASPECT_COLOR_BIT, i - 1, 1);
+				VK_IMAGE_ASPECT_COLOR_BIT, i - 1, 1, layers);
 
 			mip_width = next_width;
 			mip_height = next_height;
@@ -660,17 +720,20 @@ private:
 			VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
 			VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT,
 			VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
-			VK_IMAGE_ASPECT_COLOR_BIT, mips - 1, 1);
+			VK_IMAGE_ASPECT_COLOR_BIT, mips - 1, 1, layers);
 	}
 
 	std::shared_ptr<Context> context_;
 	VkImage image_ = VK_NULL_HANDLE;
 	VmaAllocation allocation_ = VK_NULL_HANDLE;
 	VkImageView view_ = VK_NULL_HANDLE;
+	VkImageView storage_view_ = VK_NULL_HANDLE;  // cube only; else null → view()
 	Format format_ = Format::RGBA8;
 	std::uint32_t width_ = 0;
 	std::uint32_t height_ = 0;
 	std::uint32_t mip_levels_ = 1;
+	std::uint32_t array_layers_ = 1;
+	bool cube_ = false;
 	std::atomic<bool> has_contents_{ false };
 	VkImageLayout layout_ = VK_IMAGE_LAYOUT_UNDEFINED;
 

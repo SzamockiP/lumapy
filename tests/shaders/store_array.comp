@@ -1,0 +1,15 @@
+#version 450
+// Fills each layer of an array/cubemap storage image with a per-layer colour:
+// red = layer / 5, so a 6-layer cube gets six distinguishable, solid faces
+// (green/blue constant). The storage view is 2D_ARRAY even for a cubemap.
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
+
+layout(set = 0, binding = 0, rgba8) uniform writeonly image2DArray img;
+
+void main() {
+    ivec3 p = ivec3(gl_GlobalInvocationID);
+    ivec3 sz = imageSize(img);
+    if (p.x < sz.x && p.y < sz.y && p.z < sz.z) {
+        imageStore(img, p, vec4(float(p.z) / 5.0, 0.25, 0.5, 1.0));
+    }
+}

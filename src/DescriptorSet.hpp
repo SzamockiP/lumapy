@@ -125,7 +125,9 @@ public:
 
         VkDescriptorImageInfo imageInfo{
             .sampler = VK_NULL_HANDLE,
-            .imageView = image->view(),
+            // storage_view() is the 2D_ARRAY view for a cubemap (a CUBE view is
+            // illegal as storage) and the plain view for everything else.
+            .imageView = image->storage_view(),
             .imageLayout = VK_IMAGE_LAYOUT_GENERAL
         };
 

@@ -412,6 +412,37 @@ public:
         return {};
     }
 
+    // The image counterpart: transition an image between shader accesses by
+    // hand, across every mip and layer. The one cross-submit case the automatic
+    // tracker can't reach — a compute shader bakes a storage image (GENERAL) in
+    // one submit and later frames sample it (SHADER_READ_ONLY) — becomes
+    // `cmd.barrier(image, Access.SHADER_WRITE, Access.SHADER_READ)` once, after
+    // the dispatch, so the asset is generated once instead of every frame. The
+    // layout is inferred from the access (WRITE->GENERAL, READ->SHADER_READ_ONLY);
+    // only those two shader accesses name an image layout.
+    std::expected<void, Error> barrier(std::shared_ptr<Image> image, Access src, Access dst) {
+        if (!image) {
+            return std::unexpected(err_resource("barrier: image is null"));
+        }
+        if (in_rendering_) {
+            return std::unexpected(err_resource(
+                "cmd.barrier() is not allowed inside a rendering scope; "
+                "record it before begin_rendering"));
+        }
+        const auto old_layout = image_layout_for(src);
+        const auto new_layout = image_layout_for(dst);
+        if (!old_layout || !new_layout) {
+            return std::unexpected(err_resource(
+                "cmd.barrier(image, ...) takes Access.SHADER_WRITE (GENERAL) or "
+                "Access.SHADER_READ (SHADER_READ_ONLY); other accesses are buffer-only"));
+        }
+        const StageAccess s = to_vk(src);
+        const StageAccess d = to_vk(dst);
+        record_image_barrier_(std::move(image),
+            { *old_layout, *new_layout, s.stages, d.stages, s.access, d.access });
+        return {};
+    }
+
     // ── GPU timers ──────────────────────────────────────────────────────────
     //
     // A GPU timer is a pair of query slots — exactly a Vulkan timestamp query.
@@ -595,7 +626,9 @@ private:
                     .baseMipLevel = 0,
                     .levelCount = image->mip_levels(),
                     .baseArrayLayer = 0,
-                    .layerCount = 1
+                    // All layers transition together: the tracker holds one
+                    // layout per image, and a cube/array is used as a whole.
+                    .layerCount = image->array_layers()
                 }
             };
             vkCmdPipelineBarrier(cmd, b.src_stages, b.dst_stages, 0, 0, nullptr, 0, nullptr, 1, &barrier);

@@ -42,6 +42,18 @@ inline constexpr StageAccess to_vk(Access access) {
     return { kAllShaderStages, VK_ACCESS_SHADER_READ_BIT };
 }
 
+// The image layout each shader access implies: a storage image written by a
+// shader lives in GENERAL, a sampled image in SHADER_READ_ONLY. Only these two
+// shader accesses name an image layout; the rest are buffer-only. Backs the
+// manual cmd.barrier(image, ...) — the caller names accesses, not raw layouts.
+inline std::optional<VkImageLayout> image_layout_for(Access access) {
+    switch (access) {
+        case Access::SHADER_WRITE: return VK_IMAGE_LAYOUT_GENERAL;
+        case Access::SHADER_READ:  return VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+        default:                   return std::nullopt;
+    }
+}
+
 // Computes buffer barriers at RECORD time. Deferred recording fixes the usage
 // sequence constructively — record once, replay every submit — so a barrier
 // computed here is correct for every replay and nothing runs per frame.
