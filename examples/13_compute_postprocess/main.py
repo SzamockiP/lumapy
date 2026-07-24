@@ -71,8 +71,8 @@ def record(cmd, t):
         .bind_descriptor_set(gen_set, generate, set=0)
         .push_constants(generate, 0, struct.pack("<f", t))
         .dispatch((W + 7) // 8, (H + 7) // 8))
-    with cmd.rendering(renderer):
-        cmd.bind_pipeline(present).bind_descriptor_set(present_set, present, set=0).draw(3)
+    with cmd.rendering(renderer) as c:
+        c.bind_pipeline(present).bind_descriptor_set(present_set, present, set=0).draw(3)
 
 
 # Measure the compute cost with one blocking headless submit — the timer reads
@@ -90,10 +90,24 @@ print(f"compute generate ({W}x{H}): {t.ms:.4f} ms" if t.ms is not None
 
 cmd = ctx.create_command_buffer()
 start = time.time()
+last_time = start
+frame_count = 0
+fps_timer = 0.0
 while window.is_open():
     window.poll_events()
     frame = renderer.begin_frame()
     if frame is None:
         continue
-    record(cmd, time.time() - start)
+    current_time = time.time()
+    dt = current_time - last_time
+    last_time = current_time
+    frame_count += 1
+    fps_timer += dt
+    if fps_timer >= 1.0:
+        avg_fps = frame_count / fps_timer
+        window.set_title(f"Bazalt Demo - Compute Post-processing | {1000.0 / avg_fps:.2f} ms/frame | {avg_fps:.1f} FPS")
+        frame_count = 0
+        fps_timer = 0.0
+
+    record(cmd, current_time - start)
     frame.submit(cmd)

@@ -10,6 +10,7 @@ between the dispatch's writes and the vertex fetch is recorded automatically
 import math
 import random
 import struct
+import time
 
 import bazalt as bz
 
@@ -65,10 +66,25 @@ cmd.begin()
     .bind_descriptor_set(sim_set, sim, set=0)
     .push_constants(sim, 0, struct.pack("<f", 1.0 / 60.0))
     .dispatch((N + 63) // 64))
-with cmd.rendering(renderer, clear_color=[0.02, 0.02, 0.05, 1.0]):
-    cmd.bind_pipeline(draw).bind_vertex_buffer(particles).draw(N)
+with cmd.rendering(renderer, clear_color=[0.02, 0.02, 0.05, 1.0]) as c:
+    c.bind_pipeline(draw).bind_vertex_buffer(particles).draw(N)
+
+last_time = time.time()
+frame_count = 0
+fps_timer = 0.0
 
 while window.is_open():
     window.poll_events()
     if frame := renderer.begin_frame():
+        current_time = time.time()
+        dt = current_time - last_time
+        last_time = current_time
+        frame_count += 1
+        fps_timer += dt
+        if fps_timer >= 1.0:
+            avg_fps = frame_count / fps_timer
+            window.set_title(f"Bazalt Demo - Compute Particles | {1000.0 / avg_fps:.2f} ms/frame | {avg_fps:.1f} FPS")
+            frame_count = 0
+            fps_timer = 0.0
+
         frame.submit(cmd)

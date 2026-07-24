@@ -13,6 +13,8 @@ differently sized image and it warns and keeps the old one. That resilience is
 the whole point — hot_reload=True is the only new line versus example 03.
 """
 
+import time
+
 import bazalt as bz
 
 logger = bz.Logger()
@@ -45,16 +47,29 @@ desc_set = pool.allocate_set(pipeline, set=0)
 desc_set.set_image(0, texture)
 
 frames = 0
+last_time = time.time()
+frame_count = 0
+fps_timer = 0.0
 while window.is_open():
     window.poll_events()
     if frame := renderer.begin_frame():
+        current_time = time.time()
+        dt = current_time - last_time
+        last_time = current_time
+        frame_count += 1
+        fps_timer += dt
+        if fps_timer >= 1.0:
+            avg_fps = frame_count / fps_timer
+            window.set_title(f"Bazalt - Hot Reload (edit while running) | {1000.0 / avg_fps:.2f} ms/frame | {avg_fps:.1f} FPS")
+            frame_count = 0
+            fps_timer = 0.0
+
         cmd = ctx.create_command_buffer()
         cmd.begin()
-        cmd.begin_rendering(renderer, clear_color=[0.02, 0.02, 0.03, 1.0])
-        cmd.bind_pipeline(pipeline)
-        cmd.bind_descriptor_set(desc_set, pipeline, set=0)
-        cmd.draw(3)
-        cmd.end_rendering(renderer)
+        with cmd.rendering(renderer, clear_color=[0.02, 0.02, 0.03, 1.0]) as c:
+            (c.bind_pipeline(pipeline)
+              .bind_descriptor_set(desc_set, pipeline, set=0)
+              .draw(3))
         frame.submit(cmd)
 
         frames += 1

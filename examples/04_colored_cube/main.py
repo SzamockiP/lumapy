@@ -124,13 +124,12 @@ desc_set.set_buffer(0, ubuf)
 # Record commands
 cmd = ctx.create_command_buffer()
 cmd.begin()
-cmd.begin_rendering(renderer, clear_color=[0.1, 0.2, 0.3, 1.0])
-cmd.bind_pipeline(pipeline)
-cmd.bind_descriptor_set(desc_set, pipeline, set=0)
-cmd.bind_vertex_buffer(vbuf)
-cmd.bind_index_buffer(ibuf)
-cmd.draw_indexed(36)
-cmd.end_rendering(renderer)
+with cmd.rendering(renderer, clear_color=[0.1, 0.2, 0.3, 1.0]) as c:
+    (c.bind_pipeline(pipeline)
+      .bind_descriptor_set(desc_set, pipeline, set=0)
+      .bind_vertex_buffer(vbuf)
+      .bind_index_buffer(ibuf)
+      .draw_indexed(36))
 
 # Main loop
 camera = Camera(pos=(0.0, 0.0, 3.0), speed=2.5)

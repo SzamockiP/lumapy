@@ -218,18 +218,14 @@ class DemoApp:
         # Create and record a command buffer
         self.cmd = self.ctx.create_command_buffer()
         self.cmd.begin()
-        self.cmd.begin_rendering(self.renderer, clear_color=[0.1, 0.2, 0.3, 1.0])
-        self.cmd.bind_pipeline(self.pipeline)
-        self.cmd.bind_descriptor_set(self.frame_set, self.pipeline, set=0)
-        
-        self.cmd.bind_vertex_buffer(self.vbuf)
-        self.cmd.bind_index_buffer(self.ibuf)
-        
-        for dc in self.draw_calls:
-            self.cmd.bind_descriptor_set(self.texture_sets[dc['texture']], self.pipeline, set=1)
-            self.cmd.draw_indexed(dc['index_count'], first_index=dc['first_index'], vertex_offset=dc['vertex_offset'])
-            
-        self.cmd.end_rendering(self.renderer)
+        with self.cmd.rendering(self.renderer, clear_color=[0.1, 0.2, 0.3, 1.0]) as c:
+            (c.bind_pipeline(self.pipeline)
+              .bind_descriptor_set(self.frame_set, self.pipeline, set=0)
+              .bind_vertex_buffer(self.vbuf)
+              .bind_index_buffer(self.ibuf))
+            for dc in self.draw_calls:
+                (c.bind_descriptor_set(self.texture_sets[dc['texture']], self.pipeline, set=1)
+                  .draw_indexed(dc['index_count'], first_index=dc['first_index'], vertex_offset=dc['vertex_offset']))
 
     def run(self):
         print("Rendering started")
